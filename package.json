@@ -1,0 +1,17 @@
+{
+  "name": "mamax-gemini-live-call",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@google/genai": "latest",
+    "dotenv": "latest",
+    "express": "latest",
+    "ws": "latest"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
