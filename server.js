@@ -27,21 +27,37 @@ if (!GEMINI_API_KEY) {
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const STORIES_DIR = path.join(__dirname, 'stories');
+// Correct folder name is "stories".
+// This also supports the common typo "stoies" so your current GitHub folder can still work.
+const STORY_DIR_NAMES = ['stories', 'stoies'];
+const STORIES_DIRS = STORY_DIR_NAMES.map((name) => path.join(__dirname, name));
 
 const app = express();
 app.use(express.json({ limit: '1mb' }));
 
 function listStoryFiles() {
-  try {
-    if (!fs.existsSync(STORIES_DIR)) return [];
-    return fs
-      .readdirSync(STORIES_DIR)
-      .filter((name) => name.toLowerCase().endsWith('.txt'))
-      .map((name) => path.join(STORIES_DIR, name));
-  } catch {
-    return [];
+  const files = [];
+
+  for (const dir of STORIES_DIRS) {
+    try {
+      if (!fs.existsSync(dir)) continue;
+
+      const found = fs
+        .readdirSync(dir)
+        .filter((name) => name.toLowerCase().endsWith('.txt'))
+        .map((name) => path.join(dir, name));
+
+      files.push(...found);
+    } catch {}
   }
+
+  return files;
+}
+
+function storyFoldersFound() {
+  return STORIES_DIRS
+    .filter((dir) => fs.existsSync(dir))
+    .map((dir) => path.basename(dir));
 }
 
 function readRandomStory() {
@@ -82,7 +98,8 @@ app.get('/', (_req, res) => {
     `Model: ${GEMINI_LIVE_MODEL}\n` +
     `Voice: ${GEMINI_VOICE_NAME}\n` +
     `Mode: adult wife-style romantic voice, suggestive not graphic.\n` +
-    `Khmer story library: ${listStoryFiles().length} story file(s).\n`
+    `Khmer story library: ${listStoryFiles().length} story file(s).\n` +
+    `Story folders found: ${storyFoldersFound().join(', ') || 'none'}\n`
   );
 });
 
@@ -97,6 +114,7 @@ app.get('/health', (_req, res) => {
     khmerWordScript: 'enabled',
     khmerStoryLibrary: 'enabled',
     storyCount: listStoryFiles().length,
+    storyFoldersFound: storyFoldersFound(),
     adultStyle: 'romantic, intimate, suggestive, not graphic',
     hasGeminiKey: Boolean(GEMINI_API_KEY),
   });
@@ -208,6 +226,7 @@ wss.on('connection', async (client) => {
     model: GEMINI_LIVE_MODEL,
     voice: GEMINI_VOICE_NAME,
     storyCount: listStoryFiles().length,
+    storyFoldersFound: storyFoldersFound(),
   });
 
   async function flushPendingInputs() {
