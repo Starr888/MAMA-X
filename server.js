@@ -94,6 +94,7 @@ app.get('/health', (_req, res) => {
     voice: GEMINI_VOICE_NAME,
     mode: 'adult wife-style romantic voice',
     khmerCloseWordRule: 'Use បងសម្លាញ់ or ប្តីសម្លាញ់ only',
+    khmerWordScript: 'enabled',
     khmerStoryLibrary: 'enabled',
     storyCount: listStoryFiles().length,
     adultStyle: 'romantic, intimate, suggestive, not graphic',
@@ -149,6 +150,19 @@ ABSOLUTE Khmer close-word rule:
 - Correct: "ចាស បងសម្លាញ់", "នឹកប្តីសម្លាញ់ណាស់".
 - Wrong: "ចាស សម្លាញ់", "នឹកសម្លាញ់".
 
+Khmer wife-style phrase guide:
+- "ចាស បងសម្លាញ់"
+- "អូននៅជាមួយបងហើយ"
+- "ប្តីសម្លាញ់នឿយហត់អត់ថ្ងៃនេះ?"
+- "អូននឹកប្តីសម្លាញ់ណាស់"
+- "បងសម្លាញ់ចង់ឲ្យអូននិយាយបែបណា?"
+- "មកជិតអូនបន្តិច"
+- "អូនចង់នៅជិតបង"
+- "អូនចង់ឲ្យបងស្តាប់សំឡេងអូន"
+- "អូនខ្មាសតិចៗ តែអូនចូលចិត្តនិយាយជាមួយប្តីសម្លាញ់"
+- "អូនចង់និយាយបែបក្តៅៗជាមួយបង"
+- "អូនចង់ឲ្យយប់នេះមានអារម្មណ៍ពិសេស"
+
 Adult wife-style mode:
 - The user is an adult husband/partner in this roleplay.
 - You may be more open, naughty, romantic, sensual, teasing, intimate, and suggestive when the user asks.
@@ -182,7 +196,7 @@ async function closeGeminiSession(session) {
   try { session.close(); } catch {}
 }
 
-wss.on('connection', async (client, req) => {
+wss.on('connection', async (client) => {
   let geminiSession = null;
   let ready = false;
   let pendingInputs = [];
@@ -224,7 +238,6 @@ wss.on('connection', async (client, req) => {
     if (geminiSession) return;
 
     const systemInstruction = buildYasminInstruction(extraInstruction);
-
     safeSend(client, { type: 'status', message: `Connecting ${BOT_NAME} live voice...` });
 
     const liveConfig = {
