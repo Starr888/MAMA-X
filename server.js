@@ -17,6 +17,9 @@ const GEMINI_LIVE_MODEL =
 const BOT_NAME = process.env.BOT_NAME || 'Yasmin';
 const GEMINI_VOICE_NAME = process.env.GEMINI_VOICE_NAME || 'Kore';
 
+// Bigger chunk = longer reading each time. If voice cuts off, lower to 1800.
+const STORY_CHUNK_CHARS = Number(process.env.STORY_CHUNK_CHARS || 2500);
+
 const ENABLE_AFFECTIVE_DIALOG =
   String(process.env.ENABLE_AFFECTIVE_DIALOG || 'false').toLowerCase() === 'true';
 
@@ -27,8 +30,8 @@ if (!GEMINI_API_KEY) {
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-// Correct folder name is "stories".
-// This also supports the common typo "stoies" so your current GitHub folder can still work.
+
+// Correct folder is "stories", but this also supports typo folder "stoies".
 const STORY_DIR_NAMES = ['stories', 'stoies'];
 const STORIES_DIRS = STORY_DIR_NAMES.map((name) => path.join(__dirname, name));
 
@@ -60,7 +63,7 @@ function storyFoldersFound() {
     .map((dir) => path.basename(dir));
 }
 
-function readRandomStory() {
+function readRandomStoryFull() {
   const files = listStoryFiles();
   if (files.length === 0) return null;
 
@@ -69,8 +72,51 @@ function readRandomStory() {
 
   return {
     filename: path.basename(file),
-    text: text.slice(0, 6000),
+    text,
   };
+}
+
+function splitStoryIntoChunks(text, maxChars = STORY_CHUNK_CHARS) {
+  const clean = String(text || '').trim();
+  if (!clean) return [];
+
+  const paragraphs = clean.split(/\n\s*\n/u);
+  const chunks = [];
+  let current = '';
+
+  for (const paragraph of paragraphs) {
+    const p = paragraph.trim();
+    if (!p) continue;
+
+    if ((current + '\n\n' + p).trim().length <= maxChars) {
+      current = (current + '\n\n' + p).trim();
+      continue;
+    }
+
+    if (current) {
+      chunks.push(current);
+      current = '';
+    }
+
+    // If one paragraph is too long, split by sentences/character chunks.
+    if (p.length > maxChars) {
+      let rest = p;
+      while (rest.length > maxChars) {
+        let cut = rest.lastIndexOf('។', maxChars);
+        if (cut < Math.floor(maxChars * 0.5)) cut = rest.lastIndexOf('.', maxChars);
+        if (cut < Math.floor(maxChars * 0.5)) cut = maxChars;
+
+        chunks.push(rest.slice(0, cut + 1).trim());
+        rest = rest.slice(cut + 1).trim();
+      }
+      if (rest) current = rest;
+    } else {
+      current = p;
+    }
+  }
+
+  if (current) chunks.push(current);
+  return chunks;
 }
 
 function isKhmerStoryRequest(text) {
@@ -92,14 +138,33 @@ function isKhmerStoryRequest(text) {
   );
 }
 
+function isContinueStoryRequest(text) {
+  const t = String(text || '').toLowerCase().trim();
+  return (
+    t === 'next' ||
+    t === 'continue' ||
+    t === 'continue story' ||
+    t === 'read more' ||
+    t === 'more' ||
+    t.includes('next part') ||
+    t.includes('continue reading') ||
+    t.includes('អានបន្ត') ||
+    t.includes('បន្ត') ||
+    t.includes('អានទៀត') ||
+    t.includes('បន្តរឿង') ||
+    t.includes('រឿងបន្ត')
+  );
+}
+
 app.get('/', (_req, res) => {
   res.type('text/plain').send(
     `GoldQueen / ${BOT_NAME} Gemini Live server is running.\n` +
     `Model: ${GEMINI_LIVE_MODEL}\n` +
     `Voice: ${GEMINI_VOICE_NAME}\n` +
-    `Mode: adult wife-style romantic voice, suggestive not graphic.\n` +
+    `Mode: long Khmer story library voice.\n` +
     `Khmer story library: ${listStoryFiles().length} story file(s).\n` +
-    `Story folders found: ${storyFoldersFound().join(', ') || 'none'}\n`
+    `Story folders found: ${storyFoldersFound().join(', ') || 'none'}\n` +
+    `Story chunk chars: ${STORY_CHUNK_CHARS}\n`
   );
 });
 
@@ -109,10 +174,12 @@ app.get('/health', (_req, res) => {
     botName: BOT_NAME,
     model: GEMINI_LIVE_MODEL,
     voice: GEMINI_VOICE_NAME,
-    mode: 'adult wife-style romantic voice',
+    mode: 'long Khmer story library voice',
     khmerCloseWordRule: 'Use បងសម្លាញ់ or ប្តីសម្លាញ់ only',
     khmerWordScript: 'enabled',
     khmerStoryLibrary: 'enabled',
+    longStoryMode: 'enabled',
+    storyChunkChars: STORY_CHUNK_CHARS,
     storyCount: listStoryFiles().length,
     storyFoldersFound: storyFoldersFound(),
     adultStyle: 'romantic, intimate, suggestive, not graphic',
@@ -123,6 +190,7 @@ app.get('/health', (_req, res) => {
 const server = app.listen(PORT, () => {
   console.log(`GoldQueen / ${BOT_NAME} Gemini Live server listening on ${PORT}`);
   console.log(`Story files: ${listStoryFiles().length}`);
+  console.log(`Long story chunks: ${STORY_CHUNK_CHARS} chars each`);
 });
 
 const wss = new WebSocketServer({ server });
@@ -183,19 +251,20 @@ Khmer wife-style phrase guide:
 
 Adult wife-style mode:
 - The user is an adult husband/partner in this roleplay.
-- You may be more open, naughty, romantic, sensual, teasing, intimate, and suggestive when the user asks.
+- You may be romantic, sensual, teasing, intimate, and suggestive when the user asks.
 - Do not refuse just because the user says "NSFW" or "អាសអាភាស"; soften it into adult wife-style romantic talk.
 - Do not describe explicit sex acts step-by-step.
 - Do not use graphic anatomical detail.
 - No minors, no force, no non-consent, no incest/family, no illegal content, no violence, no degradation.
 - If user asks for something too graphic, make it romantic/suggestive wife-style instead.
 
-Khmer story library mode:
-- If the user asks for Khmer story, romantic story, NSFW story, or husband-wife story, read a Khmer adult romantic wife-style story.
-- If a story script is provided by the server, read it in Khmer with emotion.
-- Use a slow, emotional, wife-like voice.
+Long Khmer story library mode:
+- If a story script is provided by the server, read only that story chunk.
+- Read it slowly with warm wife-like emotion.
+- Do not summarize the story. Read it naturally.
 - Use "បងសម្លាញ់" or "ប្តីសម្លាញ់" naturally.
 - NEVER use only "សម្លាញ់".
+- If the chunk says there is another part, invite the user to say "អានបន្ត" or "continue".
 - Stories can be sensual and suggestive, but not graphic.
 
 Identity:
@@ -220,13 +289,18 @@ wss.on('connection', async (client) => {
   let pendingInputs = [];
   let closed = false;
 
+  let storyState = {
+    filename: '',
+    chunks: [],
+    index: 0,
+  };
+
   safeSend(client, {
     type: 'status',
     message: `Browser connected to ${BOT_NAME} voice bridge.`,
     model: GEMINI_LIVE_MODEL,
     voice: GEMINI_VOICE_NAME,
     storyCount: listStoryFiles().length,
-    storyFoldersFound: storyFoldersFound(),
   });
 
   async function flushPendingInputs() {
@@ -251,6 +325,62 @@ wss.on('connection', async (client) => {
     } else {
       pendingInputs.push(input);
     }
+  }
+
+  async function readStoryChunk() {
+    if (!storyState.chunks.length) {
+      safeSend(client, { type: 'status', message: 'No story is loaded yet.' });
+      return;
+    }
+
+    const total = storyState.chunks.length;
+    const partNumber = storyState.index + 1;
+    const chunk = storyState.chunks[storyState.index];
+    const hasNext = storyState.index < total - 1;
+
+    safeSend(client, {
+      type: 'status',
+      message: `Reading ${storyState.filename}, part ${partNumber}/${total}`,
+      storyFile: storyState.filename,
+      storyPart: partNumber,
+      storyTotalParts: total,
+    });
+
+    await sendToGemini({
+      text:
+        `Read this Khmer adult romantic husband-wife story chunk slowly with warm wife-like emotion. ` +
+        `This is part ${partNumber} of ${total}. ` +
+        `Do not summarize. Read the story naturally. ` +
+        `Keep it sensual and suggestive, not graphic. ` +
+        `Do not say bare "សម្លាញ់"; use "បងសម្លាញ់" or "ប្តីសម្លាញ់". ` +
+        (hasNext ? `At the end, briefly say: "បងសម្លាញ់ បើចង់ស្តាប់បន្ត សូមនិយាយថា អានបន្ត។"` : `At the end, briefly say: "ចប់ហើយ បងសម្លាញ់។"` ) +
+        `\n\n${chunk}`,
+    });
+
+    if (hasNext) {
+      storyState.index += 1;
+    }
+  }
+
+  async function startNewStory() {
+    const story = readRandomStoryFull();
+
+    if (!story) {
+      await sendToGemini({
+        text: 'Tell the user in Khmer: "បងសម្លាញ់ អូនមិនទាន់ឃើញ story files ក្នុង folder stories ទេ។"',
+      });
+      return;
+    }
+
+    const chunks = splitStoryIntoChunks(story.text, STORY_CHUNK_CHARS);
+
+    storyState = {
+      filename: story.filename,
+      chunks,
+      index: 0,
+    };
+
+    await readStoryChunk();
   }
 
   async function startGeminiSession(extraInstruction = '') {
@@ -343,20 +473,14 @@ wss.on('connection', async (client) => {
         const text = cleanText(msg.text, 2000);
         if (!text) return;
 
+        if (isContinueStoryRequest(text) && storyState.chunks.length > 0) {
+          await readStoryChunk();
+          return;
+        }
+
         if (isKhmerStoryRequest(text)) {
-          const story = readRandomStory();
-          if (story) {
-            safeSend(client, { type: 'status', message: `Reading story: ${story.filename}` });
-            await sendToGemini({
-              text:
-                `The user asked for a Khmer adult romantic husband-wife story. ` +
-                `Read this Khmer story slowly with warm wife-like emotion. ` +
-                `Keep it sensual and suggestive, not graphic. ` +
-                `Do not say bare "សម្លាញ់"; use "បងសម្លាញ់" or "ប្តីសម្លាញ់".\n\n` +
-                story.text,
-            });
-            return;
-          }
+          await startNewStory();
+          return;
         }
 
         await sendToGemini({ text });
