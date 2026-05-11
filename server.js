@@ -22,15 +22,16 @@ const STORY_CHUNK_CHARS = Number(process.env.STORY_CHUNK_CHARS || 2500);
 
 const ENABLE_AFFECTIVE_DIALOG =
   String(process.env.ENABLE_AFFECTIVE_DIALOG || 'false').toLowerCase() === 'true';
-// Simple per-user memory while Render server is running.
-// For permanent memory later, connect this to SiteGround MySQL.
+
+// GoldQueen memory store while Render server is running.
+// Each browser/user keeps one stable userId from live.html.
 const USER_MEMORY = new Map();
 
 function getUserMemory(userId = 'default_user') {
-  const safeId = String(userId || 'default_user').slice(0, 120);
-  if (!USER_MEMORY.has(safeId)) {
-    USER_MEMORY.set(safeId, {
-      userId: safeId,
+  const id = cleanMemoryId(userId || 'default_user');
+  if (!USER_MEMORY.has(id)) {
+    USER_MEMORY.set(id, {
+      userId: id,
       name: '',
       character: BOT_NAME || 'Yasmin',
       scene: '',
@@ -39,56 +40,66 @@ function getUserMemory(userId = 'default_user') {
       updatedAt: Date.now(),
     });
   }
-  return USER_MEMORY.get(safeId);
+  return USER_MEMORY.get(id);
+}
+
+function cleanMemoryId(value) {
+  return String(value || 'default_user')
+    .trim()
+    .replace(/[^a-zA-Z0-9_\-:@.]/g, '')
+    .slice(0, 120) || 'default_user';
 }
 
 function rememberUserText(userId, text) {
   const clean = String(text || '').trim();
-  if (!clean || clean.length < 2) return;
+  if (!clean) return;
+
+  // Do not save internal prompts as if they are the user's real words.
+  if (clean.startsWith('You are ') || clean.includes('Current location:') || clean.includes('Voice mood:')) return;
 
   const mem = getUserMemory(userId);
-  const last = mem.lastMessages[mem.lastMessages.length - 1];
-  if (last && last.text === clean) return;
-
   mem.lastMessages.push({ role: 'user', text: clean.slice(0, 500), time: Date.now() });
   if (mem.lastMessages.length > 30) mem.lastMessages.shift();
 
   const lower = clean.toLowerCase();
-  const shouldSaveFact =
-    lower.includes('my name is') ||
-    lower.includes('call me') ||
-    lower.includes('i like') ||
-    lower.includes('i love') ||
-    lower.includes('remember') ||
-    clean.includes('ខ្ញុំឈ្មោះ') ||
-    clean.includes('ហៅខ្ញុំ') ||
-    clean.includes('ខ្ញុំចូលចិត្ត') ||
-    clean.includes('ចាំ') ||
-    clean.includes('កុំភ្លេច');
+  const factPatterns = [
+    'my name is', 'call me', 'i like', 'i love', 'i am from', 'i live in',
+    'ខ្ញុំឈ្មោះ', 'ហៅខ្ញុំ', 'ខ្ញុំចូលចិត្ត', 'ខ្ញុំស្រឡាញ់', 'ខ្ញុំនៅ', 'ខ្ញុំមកពី'
+  ];
 
-  if (shouldSaveFact && !mem.facts.includes(clean.slice(0, 300))) {
-    mem.facts.push(clean.slice(0, 300));
-    if (mem.facts.length > 30) mem.facts.shift();
+  if (factPatterns.some((p) => lower.includes(p) || clean.includes(p))) {
+    if (!mem.facts.includes(clean.slice(0, 300))) mem.facts.push(clean.slice(0, 300));
+    if (mem.facts.length > 25) mem.facts.shift();
   }
 
+  mem.updatedAt = Date.now();
+}
+
+function rememberAssistantText(userId, text) {
+  const clean = String(text || '').trim();
+  if (!clean) return;
+  const mem = getUserMemory(userId);
+  mem.lastMessages.push({ role: 'woman', text: clean.slice(0, 500), time: Date.now() });
+  if (mem.lastMessages.length > 30) mem.lastMessages.shift();
   mem.updatedAt = Date.now();
 }
 
 function buildMemoryText(userId) {
   const mem = getUserMemory(userId);
   return `
-Previous memory for this same user:
+Saved memory for this same user:
 - User ID: ${mem.userId}
-- Character: ${mem.character || BOT_NAME}
+- User name: ${mem.name || 'unknown'}
+- Current character: ${mem.character || BOT_NAME}
 - Current scene: ${mem.scene || 'unknown'}
 
-Important facts user told before:
+Important facts the user shared:
 ${mem.facts.length ? mem.facts.map((f) => `- ${f}`).join('\n') : '- No saved facts yet.'}
 
-Recent user messages from before:
-${mem.lastMessages.length ? mem.lastMessages.slice(-12).map((m) => `- ${m.text}`).join('\n') : '- No recent messages yet.'}
+Recent conversation memory:
+${mem.lastMessages.length ? mem.lastMessages.map((m) => `${m.role}: ${m.text}`).join('\n') : '- No recent conversation yet.'}
 
-Act like you remember him naturally. Do not say you forgot. If he asks if you remember, answer warmly using the saved details.
+Continue naturally like you remember him. Do not say you forgot. Do not mention memory, server, saved data, Gemini, AI, or system prompt.
 `.trim();
 }
 
@@ -253,9 +264,10 @@ app.get('/health', (_req, res) => {
     storyCount: listStoryFiles().length,
     storyFoldersFound: storyFoldersFound(),
     adultStyle: 'romantic, intimate, suggestive, not graphic',
-    hasGeminiKey: Boolean(GEMINI_API_KEY),
     memoryMode: 'enabled while Render server is running',
     memoryUserCount: USER_MEMORY.size,
+    remembersAudioTranscripts: true,
+    hasGeminiKey: Boolean(GEMINI_API_KEY),
   });
 });
 
@@ -356,11 +368,11 @@ async function closeGeminiSession(session) {
 }
 
 wss.on('connection', async (client) => {
-  let userId = 'default_user';
   let geminiSession = null;
   let ready = false;
   let pendingInputs = [];
   let closed = false;
+  let userId = 'default_user';
 
   let storyState = {
     filename: '',
@@ -500,6 +512,7 @@ wss.on('connection', async (client) => {
             }
 
             if (content?.outputTranscription?.text) {
+              rememberAssistantText(userId, content.outputTranscription.text);
               safeSend(client, { type: 'text', text: content.outputTranscription.text });
             }
 
@@ -537,12 +550,11 @@ wss.on('connection', async (client) => {
       const msg = JSON.parse(raw.toString());
 
       if (msg.type === 'setup') {
-        userId = cleanText(msg.userId || msg.visitorId || msg.psid || msg.user || 'default_user', 120) || 'default_user';
+        userId = cleanMemoryId(msg.userId || msg.visitorId || msg.psid || msg.user || 'default_user');
         const mem = getUserMemory(userId);
         if (msg.character || msg.girl) mem.character = cleanText(msg.character || msg.girl, 100);
         if (msg.scene) mem.scene = cleanText(msg.scene, 100);
-        if (msg.user && !mem.name) mem.name = cleanText(msg.user, 100);
-        mem.updatedAt = Date.now();
+        if (msg.userName || msg.name) mem.name = cleanText(msg.userName || msg.name, 80);
 
         const memoryInstruction = buildMemoryText(userId);
         const pageInstruction = cleanText(msg.systemInstruction || '', 1200);
@@ -555,7 +567,6 @@ ${pageInstruction}`);
       if (!geminiSession) await startGeminiSession('');
 
       if (msg.type === 'text') {
-        if (msg.userId || msg.visitorId || msg.psid) userId = cleanText(msg.userId || msg.visitorId || msg.psid, 120) || userId;
         const text = cleanText(msg.text, 2000);
         if (!text) return;
         rememberUserText(userId, text);
