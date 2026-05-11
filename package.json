@@ -1,11 +1,11 @@
-
 {
-  "name": "queenx-facebook-live-control",
+  "name": "mama-x-and-queenx-live",
   "version": "1.0.0",
   "type": "module",
-  "main": "server-facebook-live.js",
+  "main": "server.js",
   "scripts": {
-    "start": "node server-facebook-live.js"
+    "start": "node server.js",
+    "live": "node server-facebook-live.js"
   },
   "dependencies": {
     "@google/genai": "^1.8.0",
