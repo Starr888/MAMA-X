@@ -22,14 +22,12 @@ const STORY_CHUNK_CHARS = Number(process.env.STORY_CHUNK_CHARS || 2500);
 
 const ENABLE_AFFECTIVE_DIALOG =
   String(process.env.ENABLE_AFFECTIVE_DIALOG || 'false').toLowerCase() === 'true';
-
-// Simple memory while Render server is running.
-// This remembers each browser/user until Render restarts.
+// Simple per-user memory while Render server is running.
+// For permanent memory later, connect this to SiteGround MySQL.
 const USER_MEMORY = new Map();
 
 function getUserMemory(userId = 'default_user') {
-  const safeId = cleanMemoryId(userId);
-
+  const safeId = String(userId || 'default_user').slice(0, 120);
   if (!USER_MEMORY.has(safeId)) {
     USER_MEMORY.set(safeId, {
       userId: safeId,
@@ -41,88 +39,56 @@ function getUserMemory(userId = 'default_user') {
       updatedAt: Date.now(),
     });
   }
-
   return USER_MEMORY.get(safeId);
 }
 
-function cleanMemoryId(value) {
-  const id = String(value || 'default_user').trim().slice(0, 120);
-  return id || 'default_user';
-}
-
 function rememberUserText(userId, text) {
-  const mem = getUserMemory(userId);
   const clean = String(text || '').trim();
-  if (!clean) return;
+  if (!clean || clean.length < 2) return;
 
-  mem.lastMessages.push({
-    role: 'user',
-    text: clean.slice(0, 500),
-    time: Date.now(),
-  });
+  const mem = getUserMemory(userId);
+  const last = mem.lastMessages[mem.lastMessages.length - 1];
+  if (last && last.text === clean) return;
 
-  if (mem.lastMessages.length > 20) mem.lastMessages.shift();
+  mem.lastMessages.push({ role: 'user', text: clean.slice(0, 500), time: Date.now() });
+  if (mem.lastMessages.length > 30) mem.lastMessages.shift();
 
   const lower = clean.toLowerCase();
-
-  // Save simple long-term facts naturally mentioned by the user.
-  if (
+  const shouldSaveFact =
     lower.includes('my name is') ||
     lower.includes('call me') ||
     lower.includes('i like') ||
     lower.includes('i love') ||
-    lower.includes('i live') ||
-    lower.includes('i am from') ||
+    lower.includes('remember') ||
     clean.includes('ខ្ញុំឈ្មោះ') ||
     clean.includes('ហៅខ្ញុំ') ||
     clean.includes('ខ្ញុំចូលចិត្ត') ||
-    clean.includes('ខ្ញុំស្រឡាញ់') ||
-    clean.includes('ខ្ញុំរស់នៅ') ||
-    clean.includes('ខ្ញុំមកពី')
-  ) {
-    const fact = clean.slice(0, 300);
-    if (!mem.facts.includes(fact)) mem.facts.push(fact);
+    clean.includes('ចាំ') ||
+    clean.includes('កុំភ្លេច');
+
+  if (shouldSaveFact && !mem.facts.includes(clean.slice(0, 300))) {
+    mem.facts.push(clean.slice(0, 300));
+    if (mem.facts.length > 30) mem.facts.shift();
   }
 
-  if (mem.facts.length > 20) mem.facts.shift();
-  mem.updatedAt = Date.now();
-}
-
-function rememberAssistantText(userId, text) {
-  const mem = getUserMemory(userId);
-  const clean = String(text || '').trim();
-  if (!clean) return;
-
-  mem.lastMessages.push({
-    role: 'yasmin',
-    text: clean.slice(0, 500),
-    time: Date.now(),
-  });
-
-  if (mem.lastMessages.length > 20) mem.lastMessages.shift();
   mem.updatedAt = Date.now();
 }
 
 function buildMemoryText(userId) {
   const mem = getUserMemory(userId);
-
   return `
-Previous user memory:
-- Same user ID: ${mem.userId}
-- Character: ${mem.character || BOT_NAME || 'Yasmin'}
-- Scene: ${mem.scene || 'unknown'}
+Previous memory for this same user:
+- User ID: ${mem.userId}
+- Character: ${mem.character || BOT_NAME}
+- Current scene: ${mem.scene || 'unknown'}
 
-Important facts about this user:
+Important facts user told before:
 ${mem.facts.length ? mem.facts.map((f) => `- ${f}`).join('\n') : '- No saved facts yet.'}
 
-Recent conversation memory:
-${
-  mem.lastMessages.length
-    ? mem.lastMessages.map((m) => `- ${m.role}: ${m.text}`).join('\n')
-    : '- No recent messages yet.'
-}
+Recent user messages from before:
+${mem.lastMessages.length ? mem.lastMessages.slice(-12).map((m) => `- ${m.text}`).join('\n') : '- No recent messages yet.'}
 
-Act like you remember him naturally. Do not say you forgot. Continue the same relationship feeling from the previous call.
+Act like you remember him naturally. Do not say you forgot. If he asks if you remember, answer warmly using the saved details.
 `.trim();
 }
 
@@ -286,10 +252,10 @@ app.get('/health', (_req, res) => {
     storyChunkChars: STORY_CHUNK_CHARS,
     storyCount: listStoryFiles().length,
     storyFoldersFound: storyFoldersFound(),
-    memoryMode: 'enabled while Render server is running',
-    memoryUsers: USER_MEMORY.size,
     adultStyle: 'romantic, intimate, suggestive, not graphic',
     hasGeminiKey: Boolean(GEMINI_API_KEY),
+    memoryMode: 'enabled while Render server is running',
+    memoryUserCount: USER_MEMORY.size,
   });
 });
 
@@ -529,11 +495,11 @@ wss.on('connection', async (client) => {
             if (content?.interrupted) safeSend(client, { type: 'interrupted' });
 
             if (content?.inputTranscription?.text) {
+              rememberUserText(userId, content.inputTranscription.text);
               safeSend(client, { type: 'input_transcript', text: content.inputTranscription.text });
             }
 
             if (content?.outputTranscription?.text) {
-              rememberAssistantText(userId, content.outputTranscription.text);
               safeSend(client, { type: 'text', text: content.outputTranscription.text });
             }
 
@@ -571,25 +537,27 @@ wss.on('connection', async (client) => {
       const msg = JSON.parse(raw.toString());
 
       if (msg.type === 'setup') {
-        userId = cleanMemoryId(msg.userId || msg.psid || msg.visitorId || 'default_user');
-
+        userId = cleanText(msg.userId || msg.visitorId || msg.psid || msg.user || 'default_user', 120) || 'default_user';
         const mem = getUserMemory(userId);
-        if (msg.character) mem.character = cleanText(msg.character, 100);
+        if (msg.character || msg.girl) mem.character = cleanText(msg.character || msg.girl, 100);
         if (msg.scene) mem.scene = cleanText(msg.scene, 100);
+        if (msg.user && !mem.name) mem.name = cleanText(msg.user, 100);
+        mem.updatedAt = Date.now();
 
         const memoryInstruction = buildMemoryText(userId);
-        const pageInstruction = cleanText(msg.systemInstruction || '', 500);
+        const pageInstruction = cleanText(msg.systemInstruction || '', 1200);
+        await startGeminiSession(`${memoryInstruction}
 
-        await startGeminiSession(`${memoryInstruction}\n\n${pageInstruction}`);
+${pageInstruction}`);
         return;
       }
 
       if (!geminiSession) await startGeminiSession('');
 
       if (msg.type === 'text') {
+        if (msg.userId || msg.visitorId || msg.psid) userId = cleanText(msg.userId || msg.visitorId || msg.psid, 120) || userId;
         const text = cleanText(msg.text, 2000);
         if (!text) return;
-
         rememberUserText(userId, text);
 
         if (isContinueStoryRequest(text) && storyState.chunks.length > 0) {
