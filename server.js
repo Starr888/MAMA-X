@@ -23,9 +23,10 @@ const STORY_CHUNK_CHARS = Number(process.env.STORY_CHUNK_CHARS || 2500);
 const ENABLE_AFFECTIVE_DIALOG =
   String(process.env.ENABLE_AFFECTIVE_DIALOG || 'false').toLowerCase() === 'true';
 
-// GoldQueen memory store while Render server is running.
-// Each browser/user keeps one stable userId from live.html.
+// GoldQueen memory store.
+// Messenger users are remembered by Facebook PSID sent from PHP as live.html?uid=PSID.
 const USER_MEMORY = new Map();
+const MEMORY_FILE = path.join(process.cwd(), 'goldqueen-memory.json');
 
 function getUserMemory(userId = 'default_user') {
   const id = cleanMemoryId(userId || 'default_user');
@@ -50,6 +51,41 @@ function cleanMemoryId(value) {
     .slice(0, 120) || 'default_user';
 }
 
+function loadMemoryFromDisk() {
+  try {
+    if (!fs.existsSync(MEMORY_FILE)) return;
+    const raw = fs.readFileSync(MEMORY_FILE, 'utf8');
+    const data = JSON.parse(raw || '{}');
+    for (const [id, mem] of Object.entries(data)) {
+      const cleanId = cleanMemoryId(id);
+      if (!cleanId) continue;
+      USER_MEMORY.set(cleanId, {
+        userId: cleanId,
+        name: String(mem.name || ''),
+        character: String(mem.character || BOT_NAME || 'Yasmin'),
+        scene: String(mem.scene || ''),
+        facts: Array.isArray(mem.facts) ? mem.facts.slice(-25) : [],
+        lastMessages: Array.isArray(mem.lastMessages) ? mem.lastMessages.slice(-30) : [],
+        updatedAt: Number(mem.updatedAt || Date.now()),
+      });
+    }
+    console.log(`Loaded GoldQueen memory: ${USER_MEMORY.size} user(s)`);
+  } catch (err) {
+    console.error('Could not load GoldQueen memory:', err?.message || String(err));
+  }
+}
+
+function saveMemoryToDisk() {
+  try {
+    const data = Object.fromEntries(USER_MEMORY.entries());
+    fs.writeFileSync(MEMORY_FILE, JSON.stringify(data, null, 2));
+  } catch (err) {
+    console.error('Could not save GoldQueen memory:', err?.message || String(err));
+  }
+}
+
+loadMemoryFromDisk();
+
 function rememberUserText(userId, text) {
   const clean = String(text || '').trim();
   if (!clean) return;
@@ -73,6 +109,7 @@ function rememberUserText(userId, text) {
   }
 
   mem.updatedAt = Date.now();
+  saveMemoryToDisk();
 }
 
 function rememberAssistantText(userId, text) {
@@ -82,6 +119,7 @@ function rememberAssistantText(userId, text) {
   mem.lastMessages.push({ role: 'woman', text: clean.slice(0, 500), time: Date.now() });
   if (mem.lastMessages.length > 30) mem.lastMessages.shift();
   mem.updatedAt = Date.now();
+  saveMemoryToDisk();
 }
 
 function buildMemoryText(userId) {
@@ -267,6 +305,8 @@ app.get('/health', (_req, res) => {
     memoryMode: 'enabled while Render server is running',
     memoryUserCount: USER_MEMORY.size,
     remembersAudioTranscripts: true,
+    messengerPsidMemory: true,
+    persistentJsonMemory: true,
     hasGeminiKey: Boolean(GEMINI_API_KEY),
   });
 });
@@ -555,6 +595,8 @@ wss.on('connection', async (client) => {
         if (msg.character || msg.girl) mem.character = cleanText(msg.character || msg.girl, 100);
         if (msg.scene) mem.scene = cleanText(msg.scene, 100);
         if (msg.userName || msg.name) mem.name = cleanText(msg.userName || msg.name, 80);
+        mem.updatedAt = Date.now();
+        saveMemoryToDisk();
 
         const memoryInstruction = buildMemoryText(userId);
         const pageInstruction = cleanText(msg.systemInstruction || '', 1200);
