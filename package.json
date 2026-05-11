@@ -1,17 +1,14 @@
 {
-  "name": "mamax-gemini-live-call",
+  "name": "goldqueen-facebook-live-avatar",
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server-facebook-live.js"
   },
   "dependencies": {
     "@google/genai": "latest",
     "dotenv": "latest",
     "express": "latest",
     "ws": "latest"
-  },
-  "engines": {
-    "node": ">=20"
   }
 }
