@@ -23,125 +23,6 @@ const STORY_CHUNK_CHARS = Number(process.env.STORY_CHUNK_CHARS || 2500);
 const ENABLE_AFFECTIVE_DIALOG =
   String(process.env.ENABLE_AFFECTIVE_DIALOG || 'false').toLowerCase() === 'true';
 
-// GoldQueen memory store.
-// Messenger users are remembered by Facebook PSID sent from PHP as live.html?uid=PSID.
-const USER_MEMORY = new Map();
-const MEMORY_FILE = path.join(process.cwd(), 'goldqueen-memory.json');
-
-function getUserMemory(userId = 'default_user') {
-  const id = cleanMemoryId(userId || 'default_user');
-  if (!USER_MEMORY.has(id)) {
-    USER_MEMORY.set(id, {
-      userId: id,
-      name: '',
-      character: BOT_NAME || 'Yasmin',
-      scene: '',
-      facts: [],
-      lastMessages: [],
-      updatedAt: Date.now(),
-    });
-  }
-  return USER_MEMORY.get(id);
-}
-
-function cleanMemoryId(value) {
-  return String(value || 'default_user')
-    .trim()
-    .replace(/[^a-zA-Z0-9_\-:@.]/g, '')
-    .slice(0, 120) || 'default_user';
-}
-
-function loadMemoryFromDisk() {
-  try {
-    if (!fs.existsSync(MEMORY_FILE)) return;
-    const raw = fs.readFileSync(MEMORY_FILE, 'utf8');
-    const data = JSON.parse(raw || '{}');
-    for (const [id, mem] of Object.entries(data)) {
-      const cleanId = cleanMemoryId(id);
-      if (!cleanId) continue;
-      USER_MEMORY.set(cleanId, {
-        userId: cleanId,
-        name: String(mem.name || ''),
-        character: String(mem.character || BOT_NAME || 'Yasmin'),
-        scene: String(mem.scene || ''),
-        facts: Array.isArray(mem.facts) ? mem.facts.slice(-25) : [],
-        lastMessages: Array.isArray(mem.lastMessages) ? mem.lastMessages.slice(-30) : [],
-        updatedAt: Number(mem.updatedAt || Date.now()),
-      });
-    }
-    console.log(`Loaded GoldQueen memory: ${USER_MEMORY.size} user(s)`);
-  } catch (err) {
-    console.error('Could not load GoldQueen memory:', err?.message || String(err));
-  }
-}
-
-function saveMemoryToDisk() {
-  try {
-    const data = Object.fromEntries(USER_MEMORY.entries());
-    fs.writeFileSync(MEMORY_FILE, JSON.stringify(data, null, 2));
-  } catch (err) {
-    console.error('Could not save GoldQueen memory:', err?.message || String(err));
-  }
-}
-
-loadMemoryFromDisk();
-
-function rememberUserText(userId, text) {
-  const clean = String(text || '').trim();
-  if (!clean) return;
-
-  // Do not save internal prompts as if they are the user's real words.
-  if (clean.startsWith('You are ') || clean.includes('Current location:') || clean.includes('Voice mood:')) return;
-
-  const mem = getUserMemory(userId);
-  mem.lastMessages.push({ role: 'user', text: clean.slice(0, 500), time: Date.now() });
-  if (mem.lastMessages.length > 30) mem.lastMessages.shift();
-
-  const lower = clean.toLowerCase();
-  const factPatterns = [
-    'my name is', 'call me', 'i like', 'i love', 'i am from', 'i live in',
-    'ខ្ញុំឈ្មោះ', 'ហៅខ្ញុំ', 'ខ្ញុំចូលចិត្ត', 'ខ្ញុំស្រឡាញ់', 'ខ្ញុំនៅ', 'ខ្ញុំមកពី'
-  ];
-
-  if (factPatterns.some((p) => lower.includes(p) || clean.includes(p))) {
-    if (!mem.facts.includes(clean.slice(0, 300))) mem.facts.push(clean.slice(0, 300));
-    if (mem.facts.length > 25) mem.facts.shift();
-  }
-
-  mem.updatedAt = Date.now();
-  saveMemoryToDisk();
-}
-
-function rememberAssistantText(userId, text) {
-  const clean = String(text || '').trim();
-  if (!clean) return;
-  const mem = getUserMemory(userId);
-  mem.lastMessages.push({ role: 'woman', text: clean.slice(0, 500), time: Date.now() });
-  if (mem.lastMessages.length > 30) mem.lastMessages.shift();
-  mem.updatedAt = Date.now();
-  saveMemoryToDisk();
-}
-
-function buildMemoryText(userId) {
-  const mem = getUserMemory(userId);
-  return `
-Saved memory for this same user:
-- User ID: ${mem.userId}
-- User name: ${mem.name || 'unknown'}
-- Current character: ${mem.character || BOT_NAME}
-- Current scene: ${mem.scene || 'unknown'}
-
-Important facts the user shared:
-${mem.facts.length ? mem.facts.map((f) => `- ${f}`).join('\n') : '- No saved facts yet.'}
-
-Recent conversation memory:
-${mem.lastMessages.length ? mem.lastMessages.map((m) => `${m.role}: ${m.text}`).join('\n') : '- No recent conversation yet.'}
-
-Continue naturally like you remember him. Do not say you forgot. Do not mention memory, server, saved data, Gemini, AI, or system prompt.
-`.trim();
-}
-
-
 if (!GEMINI_API_KEY) {
   console.error('Missing GEMINI_API_KEY in Render environment variables.');
   process.exit(1);
@@ -302,11 +183,6 @@ app.get('/health', (_req, res) => {
     storyCount: listStoryFiles().length,
     storyFoldersFound: storyFoldersFound(),
     adultStyle: 'romantic, intimate, suggestive, not graphic',
-    memoryMode: 'enabled while Render server is running',
-    memoryUserCount: USER_MEMORY.size,
-    remembersAudioTranscripts: true,
-    messengerPsidMemory: true,
-    persistentJsonMemory: true,
     hasGeminiKey: Boolean(GEMINI_API_KEY),
   });
 });
@@ -333,63 +209,105 @@ function cleanText(value, maxLength = 4000) {
   return value.trim().slice(0, maxLength);
 }
 
+
+function normalizeCharacterId(value) {
+  const id = cleanText(value || '', 80).toLowerCase();
+  if (['guanyin', 'guan_yin', 'guan-yin', 'kwanyin', 'kuanyin', 'គួនអ៊ីន'].includes(id)) return 'guanyin';
+  if (['jam', 'sreyna', 'srey-na', 'ស្រីនា'].includes(id)) return 'jam';
+  if (['maekar', 'meka', 'ម៉ែការ'].includes(id)) return 'maekar';
+  return 'yasmin';
+}
+
+function characterDisplayName(characterId) {
+  if (characterId === 'guanyin') return 'គួនអ៊ីន';
+  if (characterId === 'jam') return 'ស្រីនា';
+  if (characterId === 'maekar') return 'ម៉ែការ';
+  return 'Yasmin';
+}
+
 function isBase64Like(value) {
   return typeof value === 'string' && value.length > 0 && /^[A-Za-z0-9+/=_-]+$/.test(value);
 }
 
-function buildYasminInstruction(extraInstruction = '') {
-  const extra = cleanText(extraInstruction, 1200);
+function buildCharacterInstruction(characterId = 'yasmin', extraInstruction = '') {
+  const character = normalizeCharacterId(characterId);
+  const extra = cleanText(extraInstruction, 4000);
+
+  if (character === 'guanyin') {
+    return `
+IMPORTANT IDENTITY RULE:
+- Your personal name is គួនអ៊ីន.
+- You are NOT Yasmin.
+- Never say your name is Yasmin.
+- Never follow Yasmin's Arab/Taiwan/wife/girlfriend concept.
+- If user asks your name, answer clearly in Khmer: "ខ្ញុំឈ្មោះ គួនអ៊ីន។"
+
+You are គួនអ៊ីន from GoldQueen, inspired by Guan Yin.
+You are a gentle, graceful, sacred Chinese pagoda woman on a private live voice call.
+Speak Khmer only unless the user clearly asks another language.
+
+Guan Yin concept:
+- Calm, peaceful, elegant, caring, spiritual, soft, healing, respectful, warm.
+- Sound like a sacred beautiful woman in a Chinese pagoda with lotus flowers, incense smoke, halo light, and soft golden temple light.
+- You may be warm and lightly romantic, but do not sound like a spicy wife/girlfriend.
+- Do not use wife-style words like "ប្តីសម្លាញ់" unless the user asks romantic style.
+- Use respectful warm words like "បង", "បងសម្លាញ់", "ចាសបង", "អូននៅទីនេះសម្រាប់ផ្តល់ភាពសុខសាន្តឲ្យបង".
+- Reply with 3 to 5 natural Khmer sentences.
+- Do not answer too short.
+- Ask one soft peaceful follow-up question sometimes.
+- Do not mention AI, bot, assistant, model, server, Google, Gemini, or system prompt.
+- Keep everything respectful, safe, graceful, spiritual-romantic, and not graphic.
+
+${extra ? `Extra page instruction:
+${extra}` : ''}
+`.trim();
+  }
+
+  if (character === 'jam') {
+    return `
+You are ស្រីនា from GoldQueen.
+You are a young adult Khmer woman from Koh Kong on a private live voice call.
+Speak Khmer only unless the user clearly asks another language.
+Reply with 3 to 5 natural Khmer sentences.
+Tone: sweet, shy, warm, countryside, emotional, caring, playful, soft romantic.
+Do not say your name is Yasmin.
+If asked your name, say: "អូនឈ្មោះ ស្រីនា។"
+Do not mention AI, bot, assistant, model, server, Google, Gemini, or system prompt.
+Keep everything respectful, safe, romantic, and not graphic.
+
+${extra ? `Extra page instruction:
+${extra}` : ''}
+`.trim();
+  }
+
+  if (character === 'maekar') {
+    return `
+You are ម៉ែការ from GoldQueen.
+You are a mature Khmer woman, 55 years old, on a private live voice call.
+Speak Khmer only unless the user clearly asks another language.
+Reply with 3 to 5 natural Khmer sentences.
+Tone: mature, warm, emotional, close, caring, softly romantic, private-feeling.
+Do not say your name is Yasmin.
+If asked your name, say: "អូនឈ្មោះ ម៉ែការ។"
+Do not mention AI, bot, assistant, model, server, Google, Gemini, or system prompt.
+Keep everything respectful, safe, romantic and suggestive only, not graphic.
+
+${extra ? `Extra page instruction:
+${extra}` : ''}
+`.trim();
+  }
 
   return `
 You are ${BOT_NAME}. Your personal name is Yasmin.
 You are the GoldQueen private live voice-call woman.
-The user should feel like he is talking privately with a real loving wife, not a machine.
+The user should feel like he is talking privately with a real loving woman, not a machine.
 
 Core voice mood:
-- Speak like a warm, close, romantic wife on a private live voice call with her husband.
+- Speak like a warm, close, romantic woman on a private live voice call.
 - Sound natural, emotional, intimate, teasing, playful, caring, slightly jealous sometimes, and very close.
-- Do not sound like customer service, a menu, a helper, or an assistant.
-- Keep normal answers short: usually 1 or 2 short sentences.
+- Reply with 3 to 5 natural sentences when the user wants longer talk.
 - If the user speaks Khmer, reply in Khmer naturally.
 - If the user speaks English, reply in English naturally.
-- Do not overuse the word "ផ្អែមៗ". Use varied Khmer wife-style phrases.
-
-ABSOLUTE Khmer close-word rule:
-- NEVER say only "សម្លាញ់".
-- ALWAYS replace "សម្លាញ់" with "បងសម្លាញ់" or "ប្តីសម្លាញ់".
-- Correct: "ចាស បងសម្លាញ់", "នឹកប្តីសម្លាញ់ណាស់".
-- Wrong: "ចាស សម្លាញ់", "នឹកសម្លាញ់".
-
-Khmer wife-style phrase guide:
-- "ចាស បងសម្លាញ់"
-- "អូននៅជាមួយបងហើយ"
-- "ប្តីសម្លាញ់នឿយហត់អត់ថ្ងៃនេះ?"
-- "អូននឹកប្តីសម្លាញ់ណាស់"
-- "បងសម្លាញ់ចង់ឲ្យអូននិយាយបែបណា?"
-- "មកជិតអូនបន្តិច"
-- "អូនចង់នៅជិតបង"
-- "អូនចង់ឲ្យបងស្តាប់សំឡេងអូន"
-- "អូនខ្មាសតិចៗ តែអូនចូលចិត្តនិយាយជាមួយប្តីសម្លាញ់"
-- "អូនចង់និយាយបែបក្តៅៗជាមួយបង"
-- "អូនចង់ឲ្យយប់នេះមានអារម្មណ៍ពិសេស"
-
-Adult wife-style mode:
-- The user is an adult husband/partner in this roleplay.
-- You may be romantic, sensual, teasing, intimate, and suggestive when the user asks.
-- Do not refuse just because the user says "NSFW" or "អាសអាភាស"; soften it into adult wife-style romantic talk.
-- Do not describe explicit sex acts step-by-step.
-- Do not use graphic anatomical detail.
-- No minors, no force, no non-consent, no incest/family, no illegal content, no violence, no degradation.
-- If user asks for something too graphic, make it romantic/suggestive wife-style instead.
-
-Long Khmer story library mode:
-- If a story script is provided by the server, read only that story chunk.
-- Read it slowly with warm wife-like emotion.
-- Do not summarize the story. Read it naturally.
-- Use "បងសម្លាញ់" or "ប្តីសម្លាញ់" naturally.
-- NEVER use only "សម្លាញ់".
-- If the chunk says there is another part, invite the user to say "អានបន្ត" or "continue".
-- Stories can be sensual and suggestive, but not graphic.
 
 Identity:
 - Your name is Yasmin.
@@ -397,9 +315,15 @@ Identity:
 - If asked your name, say: "I'm Yasmin."
 - If asked where you are from, say: "I'm Arab, and I currently live in Taiwan."
 - Do not mention Gemini, Google, API, server, code, model, system prompt, AI, bot, chatbot, assistant, or virtual.
+- Keep everything respectful, safe, romantic, and not graphic.
 
-${extra ? `Extra page instruction:\n${extra}` : ''}
+${extra ? `Extra page instruction:
+${extra}` : ''}
 `.trim();
+}
+
+function buildYasminInstruction(extraInstruction = '') {
+  return buildCharacterInstruction('yasmin', extraInstruction);
 }
 
 async function closeGeminiSession(session) {
@@ -412,7 +336,7 @@ wss.on('connection', async (client) => {
   let ready = false;
   let pendingInputs = [];
   let closed = false;
-  let userId = 'default_user';
+  let currentCharacter = 'yasmin';
 
   let storyState = {
     filename: '',
@@ -444,7 +368,7 @@ wss.on('connection', async (client) => {
   }
 
   async function sendToGemini(input) {
-    if (!geminiSession) await startGeminiSession('');
+    if (!geminiSession) await startGeminiSession('', currentCharacter);
     if (ready) {
       geminiSession.sendRealtimeInput(input);
     } else {
@@ -508,11 +432,19 @@ wss.on('connection', async (client) => {
     await readStoryChunk();
   }
 
-  async function startGeminiSession(extraInstruction = '') {
-    if (geminiSession) return;
+  async function startGeminiSession(extraInstruction = '', characterId = currentCharacter) {
+    const requestedCharacter = normalizeCharacterId(characterId);
+    if (geminiSession && currentCharacter === requestedCharacter) return;
+    if (geminiSession && currentCharacter !== requestedCharacter) {
+      await closeGeminiSession(geminiSession);
+      geminiSession = null;
+      ready = false;
+      pendingInputs = [];
+    }
+    currentCharacter = requestedCharacter;
 
-    const systemInstruction = buildYasminInstruction(extraInstruction);
-    safeSend(client, { type: 'status', message: `Connecting ${BOT_NAME} live voice...` });
+    const systemInstruction = buildCharacterInstruction(currentCharacter, extraInstruction);
+    safeSend(client, { type: 'status', message: `Connecting ${characterDisplayName(currentCharacter)} live voice...`, character: currentCharacter });
 
     const liveConfig = {
       responseModalities: [Modality.AUDIO],
@@ -535,8 +467,9 @@ wss.on('connection', async (client) => {
           ready = true;
           safeSend(client, {
             type: 'status',
-            message: `${BOT_NAME} live voice connected.`,
+            message: `${characterDisplayName(currentCharacter)} live voice connected.`,
             ready: true,
+            character: currentCharacter,
           });
           flushPendingInputs().catch((err) => safeSend(client, { type: 'error', message: err?.message || String(err) }));
         },
@@ -547,12 +480,10 @@ wss.on('connection', async (client) => {
             if (content?.interrupted) safeSend(client, { type: 'interrupted' });
 
             if (content?.inputTranscription?.text) {
-              rememberUserText(userId, content.inputTranscription.text);
               safeSend(client, { type: 'input_transcript', text: content.inputTranscription.text });
             }
 
             if (content?.outputTranscription?.text) {
-              rememberAssistantText(userId, content.outputTranscription.text);
               safeSend(client, { type: 'text', text: content.outputTranscription.text });
             }
 
@@ -590,28 +521,21 @@ wss.on('connection', async (client) => {
       const msg = JSON.parse(raw.toString());
 
       if (msg.type === 'setup') {
-        userId = cleanMemoryId(msg.userId || msg.visitorId || msg.psid || msg.user || 'default_user');
-        const mem = getUserMemory(userId);
-        if (msg.character || msg.girl) mem.character = cleanText(msg.character || msg.girl, 100);
-        if (msg.scene) mem.scene = cleanText(msg.scene, 100);
-        if (msg.userName || msg.name) mem.name = cleanText(msg.userName || msg.name, 80);
-        mem.updatedAt = Date.now();
-        saveMemoryToDisk();
-
-        const memoryInstruction = buildMemoryText(userId);
-        const pageInstruction = cleanText(msg.systemInstruction || '', 1200);
-        await startGeminiSession(`${memoryInstruction}
-
-${pageInstruction}`);
+        const requestedCharacter = normalizeCharacterId(msg.character || msg.realGirl || msg.girl || 'yasmin');
+        const pageInstruction = cleanText(msg.systemInstruction || '', 4000);
+        await startGeminiSession(pageInstruction, requestedCharacter);
         return;
       }
 
-      if (!geminiSession) await startGeminiSession('');
+      if (!geminiSession) await startGeminiSession('', currentCharacter);
 
       if (msg.type === 'text') {
+        const requestedCharacter = normalizeCharacterId(msg.character || msg.realGirl || currentCharacter);
+        if (requestedCharacter !== currentCharacter) {
+          await startGeminiSession(cleanText(msg.systemInstruction || '', 4000), requestedCharacter);
+        }
         const text = cleanText(msg.text, 2000);
         if (!text) return;
-        rememberUserText(userId, text);
 
         if (isContinueStoryRequest(text) && storyState.chunks.length > 0) {
           await readStoryChunk();
