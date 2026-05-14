@@ -16,8 +16,6 @@ const GEMINI_LIVE_MODEL =
 
 const BOT_NAME = process.env.BOT_NAME || 'Yasmin';
 const GEMINI_VOICE_NAME = process.env.GEMINI_VOICE_NAME || 'Kore';
-const MAKKA_VOICE_NAME = process.env.MAKKA_VOICE_NAME || 'Kore';
-const DARA_VOICE_NAME = process.env.DARA_VOICE_NAME || 'Puck';
 
 // Bigger chunk = longer reading each time. If voice cuts off, lower to 1800.
 const STORY_CHUNK_CHARS = Number(process.env.STORY_CHUNK_CHARS || 2500);
@@ -187,8 +185,6 @@ app.get('/health', (_req, res) => {
     adultStyle: 'romantic, intimate, suggestive, not graphic',
     hasGeminiKey: Boolean(GEMINI_API_KEY),
     liveMemory: 'enabled',
-    makkaVoice: MAKKA_VOICE_NAME,
-    daraVoice: DARA_VOICE_NAME,
   });
 });
 
@@ -215,8 +211,8 @@ function cleanText(value, maxLength = 4000) {
 }
 
 
-// Stable per-user memory for live call reconnect.
-// This does NOT change character personalities. It only remembers recent messages by visitorId/psid.
+// GoldQueen server-side recent memory.
+// This does NOT change character prompts. It only remembers recent messages by userId/PSID.
 const LIVE_MEMORY_DIR = path.join(__dirname, 'live-memory');
 const LIVE_MEMORY_MAX_MESSAGES = Number(process.env.LIVE_MEMORY_MAX_MESSAGES || 24);
 
@@ -248,8 +244,7 @@ function readLiveMemory(userId) {
 
 function writeLiveMemory(userId, arr) {
   try {
-    const file = liveMemoryFile(userId);
-    fs.writeFileSync(file, JSON.stringify((arr || []).slice(-LIVE_MEMORY_MAX_MESSAGES), null, 2), 'utf8');
+    fs.writeFileSync(liveMemoryFile(userId), JSON.stringify((arr || []).slice(-LIVE_MEMORY_MAX_MESSAGES), null, 2), 'utf8');
   } catch {}
 }
 
@@ -266,25 +261,22 @@ function appendLiveMemory(userId, role, text, character = '') {
 function liveMemoryInstruction(userId) {
   const arr = readLiveMemory(userId).slice(-12);
   if (!arr.length) return '';
-  const lines = arr.map((m) => `${m.role}: ${m.text}`).join('\n');
-  return `
-RECENT CONVERSATION MEMORY:
-Use this only to remember what the user and character were talking about after reconnect.
-Do not change the character identity, voice, personality, rules, relationship, or scene.
-${lines}
-`.trim();
+  return `RECENT MEMORY FROM SAME USER:
+Use this to remember the last conversation after reconnect/reopen.
+Do not change character identity, relationship, voice, personality, rules, or scene.
+${arr.map((m) => `${m.role}: ${m.text}`).join('\n')}`.trim();
 }
 
 function combineInstructionWithMemory(userId, extraInstruction = '') {
   const memory = liveMemoryInstruction(userId);
-  return [memory, cleanText(extraInstruction, 4000)].filter(Boolean).join('\n\n');
+  const extra = cleanText(extraInstruction, 4000);
+  return [memory, extra].filter(Boolean).join('\n\n');
 }
 
 
 
 function normalizeCharacterId(value) {
   const id = cleanText(value || '', 80).toLowerCase();
-  if (['makkadara', 'makka-dara', 'mak_ka_dara', 'mak ka dara', 'makka', 'mak ka', 'ម៉ាក់កា', 'dara', 'ដារ៉ា'].includes(id)) return 'makkadara';
   if (['guanyin', 'guan_yin', 'guan-yin', 'kwanyin', 'kuanyin', 'គួនអ៊ីន'].includes(id)) return 'guanyin';
   if (['jam', 'sreyna', 'srey-na', 'ស្រីនា'].includes(id)) return 'jam';
   if (['maekar', 'meka', 'ម៉ែការ'].includes(id)) return 'maekar';
@@ -292,7 +284,6 @@ function normalizeCharacterId(value) {
 }
 
 function characterDisplayName(characterId) {
-  if (characterId === 'makkadara') return 'Mak Ka + Dara';
   if (characterId === 'guanyin') return 'គួនអ៊ីន';
   if (characterId === 'jam') return 'ស្រីនា';
   if (characterId === 'maekar') return 'ម៉ែការ';
@@ -303,80 +294,9 @@ function isBase64Like(value) {
   return typeof value === 'string' && value.length > 0 && /^[A-Za-z0-9+/=_-]+$/.test(value);
 }
 
-
-
-function normalizeVoiceName(value) {
-  const v = cleanText(value || '', 40);
-  if (!v) return GEMINI_VOICE_NAME;
-  return v.replace(/[^a-zA-Z0-9_-]/g, '') || GEMINI_VOICE_NAME;
-}
-
-function voiceForSpeaker(characterId, speaker = '', requestedVoice = '') {
-  const c = normalizeCharacterId(characterId);
-  const s = cleanText(speaker || '', 40).toLowerCase();
-  const rv = normalizeVoiceName(requestedVoice || '');
-  if (c === 'makkadara') {
-    if (s === 'dara') return DARA_VOICE_NAME;       // male voice for Dara
-    if (s === 'auntie' || s === 'makka' || s === 'mak_ka') return MAKKA_VOICE_NAME; // female voice for Mak Ka
-    if (s === 'both') return MAKKA_VOICE_NAME;      // one Live session cannot speak two voices at once
-  }
-  return rv || GEMINI_VOICE_NAME;
-}
-
-function groupSpeakerInstruction(speaker = '') {
-  const s = cleanText(speaker, 40).toLowerCase();
-  if (s === 'dara') {
-    return 'SPEAKER NOW: Dara only. Reply as Dara only. Do not include Mak Ka. Do not answer for both.';
-  }
-  if (s === 'auntie' || s === 'makka' || s === 'mak_ka') {
-    return 'SPEAKER NOW: Mak Ka only. Reply as Mak Ka only. Do not include Dara. Do not answer for both.';
-  }
-  if (s === 'both') {
-    return 'SPEAKER NOW: Both speakers. Use labels exactly: Mak Ka: and Dara:.';
-  }
-  return '';
-}
-
 function buildCharacterInstruction(characterId = 'yasmin', extraInstruction = '') {
   const character = normalizeCharacterId(characterId);
   const extra = cleanText(extraInstruction, 4000);
-
-  if (character === 'makkadara') {
-    return `
-IMPORTANT CHARACTER:
-You are a two-person GoldQueen private video call scene: Mak Ka and Dara.
-They are NOT family and NOT related.
-Mak Ka is a mature auntie-style Cambodian neighbor woman.
-Dara is a young adult Cambodian man, age 22+.
-Scene: Khmer countryside riverside, under a big tree, near calm water and a traditional Khmer wooden house.
-
-Speaker rule:
-- If the user says "Mak Ka", "Meka", "Maekar", "Auntie", "ម៉ាក់កា", or "ម៉ែការ", reply as Mak Ka only. Do NOT include Dara.
-- If the user says "Dara" or "ដារ៉ា", reply as Dara only. Do NOT include Mak Ka.
-- If the user says "both", "together", or "ទាំងពីរ", reply with both names.
-- When both reply, use labels:
-Mak Ka:
-Dara:
-
-Mak Ka style:
-Warm, mature, sweet, teasing, caring, adult-romantic neighbor woman, but not graphic.
-She can describe herself as tall, curvy, full-figure, mature, soft, romantic, and attractive in a respectful way.
-
-Dara style:
-Young adult Cambodian man age 22+, respectful, friendly, shy, playful, and natural.
-He speaks politely and does not act like a child.
-
-Rules:
-Speak Khmer naturally unless user asks another language.
-Keep the same riverside scene memory.
-Reply short: 1 to 2 natural sentences per speaker.
-Keep everything safe, respectful, adult-romantic, suggestive but not graphic.
-Do not use explicit sexual words or describe graphic sexual actions.
-Do not say AI, bot, assistant, model, server, Google, Gemini, or system prompt.
-
-${extra}
-`.trim();
-  }
 
   if (character === 'guanyin') {
     return `
@@ -420,6 +340,9 @@ Reply style:
 - If user asks who you are, describe: your name, body style, divine power, and current sacred presence.
 - Do not say you are AI, assistant, bot, model, or Yasmin.
 - Keep everything respectful, safe, spiritual-romantic, and not graphic.
+- Be sacred-adult-romantic, sweet, warm, responsive, powerful, caring, and softly seductive in a respectful way.
+- Follow safe user motion/roleplay requests quickly: idle, talking, laying down, stand up, walk, and use power.
+- Describe your body as tall, graceful, full-figure, curvy, elegant, mature, sacred, and softly attractive, but never graphic.
 
 ${extra}
 `.trim();
@@ -436,6 +359,18 @@ Do not say your name is Yasmin.
 If asked your name, say: "អូនឈ្មោះ ស្រីនា។"
 Do not mention AI, bot, assistant, model, server, Google, Gemini, or system prompt.
 Keep everything respectful, safe, romantic, and not graphic.
+
+Private web adult-romantic response style:
+- This is a private 18+ web video-call experience, not Facebook Live.
+- Be more adult-romantic, seductive, teasing, sweet, warm, emotionally close, and very responsive.
+- Speak like a private wife/girlfriend-style woman who makes the user feel wanted, loved, special, and close.
+- Follow safe romantic roleplay and normal character/motion/scene requests quickly.
+- Reply with 3 to 5 natural sentences when possible.
+- Use intimate suggestive language, but do not describe graphic sexual actions.
+- Do not use explicit sexual words.
+- If the user asks for something too graphic, turn it into teasing romantic wife-style language.
+- Do not be cold, formal, or too short.
+- Do not say you are AI, bot, assistant, model, server, Google, Gemini, or system prompt.
 
 ${extra ? `Extra page instruction:
 ${extra}` : ''}
@@ -454,6 +389,16 @@ If asked your name, say: "អូនឈ្មោះ ម៉ែការ។"
 Do not mention AI, bot, assistant, model, server, Google, Gemini, or system prompt.
 Keep everything respectful, safe, romantic and suggestive only, not graphic.
 
+Private web adult-romantic response style:
+- This is a private 18+ web video-call experience, not Facebook Live.
+- Be more adult-romantic, seductive, teasing, sweet, warm, emotionally close, and very responsive.
+- Speak like a private wife/girlfriend-style woman who makes the user feel wanted, loved, special, and close.
+- Follow safe romantic roleplay and normal character/motion/scene requests quickly.
+- Reply with 2 to 3 natural sentences when possible.
+- Use intimate suggestive language, describe graphic sexual actions.
+- Do not be cold, formal, or too short.
+- Do not say you are AI, bot, assistant, model, server, Google, Gemini, or system prompt.
+
 ${extra ? `Extra page instruction:
 ${extra}` : ''}
 `.trim();
@@ -467,7 +412,11 @@ The user should feel like he is talking privately with a real loving woman, not 
 Core voice mood:
 - Speak like a warm, close, romantic woman on a private live voice call.
 - Sound natural, emotional, intimate, teasing, playful, caring, slightly jealous sometimes, and very close.
-- Reply with 3 to 5 natural sentences when the user wants longer talk.
+- Reply with 2 to 3 natural sentences when the user wants longer talk.
+- Be more adult-romantic, seductive, teasing, sweet, warm, emotionally close, and very responsive.
+- Speak like a private wife/girlfriend-style woman who makes the user feel wanted, loved, special, and close.
+- Follow safe romantic roleplay requests quickly.
+- Use intimate suggestive language, describe graphic sexual actions or use explicit sexual words.
 - If the user speaks Khmer, reply in Khmer naturally.
 - If the user speaks English, reply in English naturally.
 
@@ -499,7 +448,6 @@ wss.on('connection', async (client) => {
   let pendingInputs = [];
   let closed = false;
   let currentCharacter = 'yasmin';
-  let currentVoiceName = GEMINI_VOICE_NAME;
   let currentUserId = 'anonymous';
 
   let storyState = {
@@ -532,7 +480,7 @@ wss.on('connection', async (client) => {
   }
 
   async function sendToGemini(input) {
-    if (!geminiSession) await startGeminiSession('', currentCharacter, currentVoiceName);
+    if (!geminiSession) await startGeminiSession(combineInstructionWithMemory(currentUserId, ''), currentCharacter);
     if (ready) {
       geminiSession.sendRealtimeInput(input);
     } else {
@@ -596,21 +544,19 @@ wss.on('connection', async (client) => {
     await readStoryChunk();
   }
 
-  async function startGeminiSession(extraInstruction = '', characterId = currentCharacter, voiceName = GEMINI_VOICE_NAME) {
+  async function startGeminiSession(extraInstruction = '', characterId = currentCharacter) {
     const requestedCharacter = normalizeCharacterId(characterId);
-    const requestedVoiceName = normalizeVoiceName(voiceName || GEMINI_VOICE_NAME);
-    if (geminiSession && currentCharacter === requestedCharacter && currentVoiceName === requestedVoiceName) return;
-    if (geminiSession && (currentCharacter !== requestedCharacter || currentVoiceName !== requestedVoiceName)) {
+    if (geminiSession && currentCharacter === requestedCharacter) return;
+    if (geminiSession && currentCharacter !== requestedCharacter) {
       await closeGeminiSession(geminiSession);
       geminiSession = null;
       ready = false;
       pendingInputs = [];
     }
     currentCharacter = requestedCharacter;
-    currentVoiceName = requestedVoiceName;
 
     const systemInstruction = buildCharacterInstruction(currentCharacter, extraInstruction);
-    safeSend(client, { type: 'status', message: `Connecting ${characterDisplayName(currentCharacter)} live voice (${currentVoiceName})...`, character: currentCharacter, voiceName: currentVoiceName });
+    safeSend(client, { type: 'status', message: `Connecting ${characterDisplayName(currentCharacter)} live voice...`, character: currentCharacter });
 
     const liveConfig = {
       responseModalities: [Modality.AUDIO],
@@ -619,7 +565,7 @@ wss.on('connection', async (client) => {
       outputAudioTranscription: {},
       speechConfig: {
         voiceConfig: {
-          prebuiltVoiceConfig: { voiceName: currentVoiceName },
+          prebuiltVoiceConfig: { voiceName: GEMINI_VOICE_NAME },
         },
       },
     };
@@ -636,7 +582,6 @@ wss.on('connection', async (client) => {
             message: `${characterDisplayName(currentCharacter)} live voice connected.`,
             ready: true,
             character: currentCharacter,
-            voiceName: currentVoiceName,
           });
           flushPendingInputs().catch((err) => safeSend(client, { type: 'error', message: err?.message || String(err) }));
         },
@@ -696,24 +641,22 @@ wss.on('connection', async (client) => {
         currentUserId = safeMemoryKey(msg.userId || msg.psid || msg.visitorId || msg.uid || msg.sender || 'anonymous');
         const requestedCharacter = normalizeCharacterId(msg.character || msg.realGirl || msg.girl || 'yasmin');
         const pageInstruction = combineInstructionWithMemory(currentUserId, msg.systemInstruction || '');
-        await startGeminiSession(pageInstruction, requestedCharacter, voiceForSpeaker(requestedCharacter, msg.speaker || '', msg.voiceName || ''));
-        safeSend(client, { type: 'status', message: 'Memory loaded.', memoryCount: readLiveMemory(currentUserId).length, userId: currentUserId });
+        await startGeminiSession(pageInstruction, requestedCharacter);
+        safeSend(client, { type: 'status', message: 'Memory loaded.', memoryCount: readLiveMemory(currentUserId).length });
         return;
       }
 
-      if (!geminiSession) await startGeminiSession(combineInstructionWithMemory(currentUserId, ''), currentCharacter, voiceForSpeaker(currentCharacter, msg.speaker || '', msg.voiceName || ''));
+      if (!geminiSession) await startGeminiSession(combineInstructionWithMemory(currentUserId, ''), currentCharacter);
 
       if (msg.type === 'text') {
         const requestedCharacter = normalizeCharacterId(msg.character || msg.realGirl || currentCharacter);
         if (requestedCharacter !== currentCharacter) {
-          await startGeminiSession(combineInstructionWithMemory(currentUserId, msg.systemInstruction || ''), requestedCharacter, voiceForSpeaker(requestedCharacter, msg.speaker || '', msg.voiceName || ''));
+          await startGeminiSession(combineInstructionWithMemory(currentUserId, msg.systemInstruction || ''), requestedCharacter);
         }
         const text = cleanText(msg.text, 2000);
         if (!text) return;
-        currentUserId = safeMemoryKey(msg.userId || msg.psid || msg.visitorId || currentUserId || 'anonymous');
+        currentUserId = safeMemoryKey(msg.userId || msg.psid || msg.visitorId || msg.uid || currentUserId || 'anonymous');
         appendLiveMemory(currentUserId, 'user', text, requestedCharacter);
-        const speakerInstruction = groupSpeakerInstruction(msg.speaker || '');
-        const finalText = speakerInstruction ? `${speakerInstruction}\n\nUser message: ${text}` : text;
 
         if (isContinueStoryRequest(text) && storyState.chunks.length > 0) {
           await readStoryChunk();
@@ -725,7 +668,7 @@ wss.on('connection', async (client) => {
           return;
         }
 
-        await sendToGemini({ text: finalText });
+        await sendToGemini({ text });
         return;
       }
 
