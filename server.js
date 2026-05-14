@@ -16,6 +16,8 @@ const GEMINI_LIVE_MODEL =
 
 const BOT_NAME = process.env.BOT_NAME || 'Yasmin';
 const GEMINI_VOICE_NAME = process.env.GEMINI_VOICE_NAME || 'Kore';
+const MAKKA_VOICE_NAME = process.env.MAKKA_VOICE_NAME || 'Kore';
+const DARA_VOICE_NAME = process.env.DARA_VOICE_NAME || 'Puck';
 
 // Bigger chunk = longer reading each time. If voice cuts off, lower to 1800.
 const STORY_CHUNK_CHARS = Number(process.env.STORY_CHUNK_CHARS || 2500);
@@ -185,6 +187,8 @@ app.get('/health', (_req, res) => {
     adultStyle: 'romantic, intimate, suggestive, not graphic',
     hasGeminiKey: Boolean(GEMINI_API_KEY),
     liveMemory: 'enabled',
+    makkaVoice: MAKKA_VOICE_NAME,
+    daraVoice: DARA_VOICE_NAME,
   });
 });
 
@@ -299,6 +303,25 @@ function isBase64Like(value) {
   return typeof value === 'string' && value.length > 0 && /^[A-Za-z0-9+/=_-]+$/.test(value);
 }
 
+
+
+function normalizeVoiceName(value) {
+  const v = cleanText(value || '', 40);
+  if (!v) return GEMINI_VOICE_NAME;
+  return v.replace(/[^a-zA-Z0-9_-]/g, '') || GEMINI_VOICE_NAME;
+}
+
+function voiceForSpeaker(characterId, speaker = '', requestedVoice = '') {
+  const c = normalizeCharacterId(characterId);
+  const s = cleanText(speaker || '', 40).toLowerCase();
+  const rv = normalizeVoiceName(requestedVoice || '');
+  if (c === 'makkadara') {
+    if (s === 'dara') return DARA_VOICE_NAME;       // male voice for Dara
+    if (s === 'auntie' || s === 'makka' || s === 'mak_ka') return MAKKA_VOICE_NAME; // female voice for Mak Ka
+    if (s === 'both') return MAKKA_VOICE_NAME;      // one Live session cannot speak two voices at once
+  }
+  return rv || GEMINI_VOICE_NAME;
+}
 
 function groupSpeakerInstruction(speaker = '') {
   const s = cleanText(speaker, 40).toLowerCase();
@@ -476,6 +499,7 @@ wss.on('connection', async (client) => {
   let pendingInputs = [];
   let closed = false;
   let currentCharacter = 'yasmin';
+  let currentVoiceName = GEMINI_VOICE_NAME;
   let currentUserId = 'anonymous';
 
   let storyState = {
@@ -508,7 +532,7 @@ wss.on('connection', async (client) => {
   }
 
   async function sendToGemini(input) {
-    if (!geminiSession) await startGeminiSession('', currentCharacter);
+    if (!geminiSession) await startGeminiSession('', currentCharacter, currentVoiceName);
     if (ready) {
       geminiSession.sendRealtimeInput(input);
     } else {
@@ -572,19 +596,21 @@ wss.on('connection', async (client) => {
     await readStoryChunk();
   }
 
-  async function startGeminiSession(extraInstruction = '', characterId = currentCharacter) {
+  async function startGeminiSession(extraInstruction = '', characterId = currentCharacter, voiceName = GEMINI_VOICE_NAME) {
     const requestedCharacter = normalizeCharacterId(characterId);
-    if (geminiSession && currentCharacter === requestedCharacter) return;
-    if (geminiSession && currentCharacter !== requestedCharacter) {
+    const requestedVoiceName = normalizeVoiceName(voiceName || GEMINI_VOICE_NAME);
+    if (geminiSession && currentCharacter === requestedCharacter && currentVoiceName === requestedVoiceName) return;
+    if (geminiSession && (currentCharacter !== requestedCharacter || currentVoiceName !== requestedVoiceName)) {
       await closeGeminiSession(geminiSession);
       geminiSession = null;
       ready = false;
       pendingInputs = [];
     }
     currentCharacter = requestedCharacter;
+    currentVoiceName = requestedVoiceName;
 
     const systemInstruction = buildCharacterInstruction(currentCharacter, extraInstruction);
-    safeSend(client, { type: 'status', message: `Connecting ${characterDisplayName(currentCharacter)} live voice...`, character: currentCharacter });
+    safeSend(client, { type: 'status', message: `Connecting ${characterDisplayName(currentCharacter)} live voice (${currentVoiceName})...`, character: currentCharacter, voiceName: currentVoiceName });
 
     const liveConfig = {
       responseModalities: [Modality.AUDIO],
@@ -593,7 +619,7 @@ wss.on('connection', async (client) => {
       outputAudioTranscription: {},
       speechConfig: {
         voiceConfig: {
-          prebuiltVoiceConfig: { voiceName: GEMINI_VOICE_NAME },
+          prebuiltVoiceConfig: { voiceName: currentVoiceName },
         },
       },
     };
@@ -610,6 +636,7 @@ wss.on('connection', async (client) => {
             message: `${characterDisplayName(currentCharacter)} live voice connected.`,
             ready: true,
             character: currentCharacter,
+            voiceName: currentVoiceName,
           });
           flushPendingInputs().catch((err) => safeSend(client, { type: 'error', message: err?.message || String(err) }));
         },
@@ -669,17 +696,17 @@ wss.on('connection', async (client) => {
         currentUserId = safeMemoryKey(msg.userId || msg.psid || msg.visitorId || msg.uid || msg.sender || 'anonymous');
         const requestedCharacter = normalizeCharacterId(msg.character || msg.realGirl || msg.girl || 'yasmin');
         const pageInstruction = combineInstructionWithMemory(currentUserId, msg.systemInstruction || '');
-        await startGeminiSession(pageInstruction, requestedCharacter);
+        await startGeminiSession(pageInstruction, requestedCharacter, voiceForSpeaker(requestedCharacter, msg.speaker || '', msg.voiceName || ''));
         safeSend(client, { type: 'status', message: 'Memory loaded.', memoryCount: readLiveMemory(currentUserId).length, userId: currentUserId });
         return;
       }
 
-      if (!geminiSession) await startGeminiSession(combineInstructionWithMemory(currentUserId, ''), currentCharacter);
+      if (!geminiSession) await startGeminiSession(combineInstructionWithMemory(currentUserId, ''), currentCharacter, voiceForSpeaker(currentCharacter, msg.speaker || '', msg.voiceName || ''));
 
       if (msg.type === 'text') {
         const requestedCharacter = normalizeCharacterId(msg.character || msg.realGirl || currentCharacter);
         if (requestedCharacter !== currentCharacter) {
-          await startGeminiSession(combineInstructionWithMemory(currentUserId, msg.systemInstruction || ''), requestedCharacter);
+          await startGeminiSession(combineInstructionWithMemory(currentUserId, msg.systemInstruction || ''), requestedCharacter, voiceForSpeaker(requestedCharacter, msg.speaker || '', msg.voiceName || ''));
         }
         const text = cleanText(msg.text, 2000);
         if (!text) return;
