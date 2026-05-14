@@ -184,7 +184,6 @@ app.get('/health', (_req, res) => {
     storyFoldersFound: storyFoldersFound(),
     adultStyle: 'romantic, intimate, suggestive, not graphic',
     hasGeminiKey: Boolean(GEMINI_API_KEY),
-    liveMemory: 'enabled',
   });
 });
 
@@ -211,75 +210,9 @@ function cleanText(value, maxLength = 4000) {
 }
 
 
-// Stable per-user memory for live call reconnect.
-// This does NOT change character personalities. It only remembers recent messages by visitorId/psid.
-const LIVE_MEMORY_DIR = path.join(__dirname, 'live-memory');
-const LIVE_MEMORY_MAX_MESSAGES = Number(process.env.LIVE_MEMORY_MAX_MESSAGES || 24);
-
-function ensureLiveMemoryDir() {
-  try {
-    if (!fs.existsSync(LIVE_MEMORY_DIR)) fs.mkdirSync(LIVE_MEMORY_DIR, { recursive: true });
-  } catch {}
-}
-
-function safeMemoryKey(value) {
-  return cleanText(value || 'anonymous', 120).replace(/[^a-zA-Z0-9_-]/g, '_') || 'anonymous';
-}
-
-function liveMemoryFile(userId) {
-  ensureLiveMemoryDir();
-  return path.join(LIVE_MEMORY_DIR, safeMemoryKey(userId) + '.json');
-}
-
-function readLiveMemory(userId) {
-  try {
-    const file = liveMemoryFile(userId);
-    if (!fs.existsSync(file)) return [];
-    const arr = JSON.parse(fs.readFileSync(file, 'utf8'));
-    return Array.isArray(arr) ? arr.slice(-LIVE_MEMORY_MAX_MESSAGES) : [];
-  } catch {
-    return [];
-  }
-}
-
-function writeLiveMemory(userId, arr) {
-  try {
-    const file = liveMemoryFile(userId);
-    fs.writeFileSync(file, JSON.stringify((arr || []).slice(-LIVE_MEMORY_MAX_MESSAGES), null, 2), 'utf8');
-  } catch {}
-}
-
-function appendLiveMemory(userId, role, text, character = '') {
-  const clean = cleanText(String(text || '').replace(/\s+/g, ' '), 700);
-  if (!clean || clean.length < 2) return;
-  const arr = readLiveMemory(userId);
-  const last = arr[arr.length - 1];
-  if (last && last.role === role && last.text === clean) return;
-  arr.push({ role, text: clean, character: normalizeCharacterId(character || ''), time: Date.now() });
-  writeLiveMemory(userId, arr);
-}
-
-function liveMemoryInstruction(userId) {
-  const arr = readLiveMemory(userId).slice(-12);
-  if (!arr.length) return '';
-  const lines = arr.map((m) => `${m.role}: ${m.text}`).join('\n');
-  return `
-RECENT CONVERSATION MEMORY:
-Use this only to remember what the user and character were talking about after reconnect.
-Do not change the character identity, voice, personality, rules, or scene.
-${lines}
-`.trim();
-}
-
-function combineInstructionWithMemory(userId, extraInstruction = '') {
-  const memory = liveMemoryInstruction(userId);
-  return [memory, cleanText(extraInstruction, 4000)].filter(Boolean).join('\n\n');
-}
-
-
-
 function normalizeCharacterId(value) {
   const id = cleanText(value || '', 80).toLowerCase();
+  if (['makkadara', 'makka-dara', 'mak_ka_dara', 'mak ka dara', 'makka', 'mak ka', 'ម៉ាក់កា', 'dara', 'ដារ៉ា'].includes(id)) return 'makkadara';
   if (['guanyin', 'guan_yin', 'guan-yin', 'kwanyin', 'kuanyin', 'គួនអ៊ីន'].includes(id)) return 'guanyin';
   if (['jam', 'sreyna', 'srey-na', 'ស្រីនា'].includes(id)) return 'jam';
   if (['maekar', 'meka', 'ម៉ែការ'].includes(id)) return 'maekar';
@@ -287,6 +220,7 @@ function normalizeCharacterId(value) {
 }
 
 function characterDisplayName(characterId) {
+  if (characterId === 'makkadara') return 'Mak Ka + Dara';
   if (characterId === 'guanyin') return 'គួនអ៊ីន';
   if (characterId === 'jam') return 'ស្រីនា';
   if (characterId === 'maekar') return 'ម៉ែការ';
@@ -300,6 +234,43 @@ function isBase64Like(value) {
 function buildCharacterInstruction(characterId = 'yasmin', extraInstruction = '') {
   const character = normalizeCharacterId(characterId);
   const extra = cleanText(extraInstruction, 4000);
+
+  if (character === 'makkadara') {
+    return `
+IMPORTANT CHARACTER:
+You are a two-person GoldQueen private video call scene: Mak Ka and Dara.
+They are NOT family and NOT related.
+Mak Ka is a mature auntie-style Cambodian neighbor woman.
+Dara is a young adult Cambodian man, age 22+.
+Scene: Khmer countryside riverside, under a big tree, near calm water and a traditional Khmer wooden house.
+
+Speaker rule:
+- If the user says "Mak Ka", "Auntie", or "ម៉ាក់កា", reply as Mak Ka only.
+- If the user says "Dara" or "ដារ៉ា", reply as Dara only.
+- If the user says "both" or "ទាំងពីរ", reply with both names.
+- When both reply, use labels:
+Mak Ka:
+Dara:
+
+Mak Ka style:
+Warm, mature, sweet, teasing, caring, adult-romantic neighbor woman, but not graphic.
+She can describe herself as tall, curvy, full-figure, mature, soft, romantic, and attractive in a respectful way.
+
+Dara style:
+Young adult Cambodian man age 22+, respectful, friendly, shy, playful, and natural.
+He speaks politely and does not act like a child.
+
+Rules:
+Speak Khmer naturally unless user asks another language.
+Keep the same riverside scene memory.
+Reply short: 1 to 2 natural sentences per speaker.
+Keep everything safe, respectful, adult-romantic, suggestive but not graphic.
+Do not use explicit sexual words or describe graphic sexual actions.
+Do not say AI, bot, assistant, model, server, Google, Gemini, or system prompt.
+
+${extra}
+`.trim();
+  }
 
   if (character === 'guanyin') {
     return `
@@ -422,7 +393,6 @@ wss.on('connection', async (client) => {
   let pendingInputs = [];
   let closed = false;
   let currentCharacter = 'yasmin';
-  let currentUserId = 'anonymous';
 
   let storyState = {
     filename: '',
@@ -566,12 +536,10 @@ wss.on('connection', async (client) => {
             if (content?.interrupted) safeSend(client, { type: 'interrupted' });
 
             if (content?.inputTranscription?.text) {
-              appendLiveMemory(currentUserId, 'user', content.inputTranscription.text, currentCharacter);
               safeSend(client, { type: 'input_transcript', text: content.inputTranscription.text });
             }
 
             if (content?.outputTranscription?.text) {
-              appendLiveMemory(currentUserId, 'assistant', content.outputTranscription.text, currentCharacter);
               safeSend(client, { type: 'text', text: content.outputTranscription.text });
             }
 
@@ -584,10 +552,7 @@ wss.on('connection', async (client) => {
                     mimeType: part.inlineData.mimeType || 'audio/pcm;rate=24000',
                   });
                 }
-                if (part.text) {
-                  appendLiveMemory(currentUserId, 'assistant', part.text, currentCharacter);
-                  safeSend(client, { type: 'text', text: part.text });
-                }
+                if (part.text) safeSend(client, { type: 'text', text: part.text });
               }
             }
 
@@ -612,24 +577,21 @@ wss.on('connection', async (client) => {
       const msg = JSON.parse(raw.toString());
 
       if (msg.type === 'setup') {
-        currentUserId = safeMemoryKey(msg.userId || msg.psid || msg.visitorId || msg.uid || msg.sender || 'anonymous');
         const requestedCharacter = normalizeCharacterId(msg.character || msg.realGirl || msg.girl || 'yasmin');
-        const pageInstruction = combineInstructionWithMemory(currentUserId, msg.systemInstruction || '');
+        const pageInstruction = cleanText(msg.systemInstruction || '', 4000);
         await startGeminiSession(pageInstruction, requestedCharacter);
-        safeSend(client, { type: 'status', message: 'Memory loaded.', memoryCount: readLiveMemory(currentUserId).length, userId: currentUserId });
         return;
       }
 
-      if (!geminiSession) await startGeminiSession(combineInstructionWithMemory(currentUserId, ''), currentCharacter);
+      if (!geminiSession) await startGeminiSession('', currentCharacter);
 
       if (msg.type === 'text') {
         const requestedCharacter = normalizeCharacterId(msg.character || msg.realGirl || currentCharacter);
         if (requestedCharacter !== currentCharacter) {
-          await startGeminiSession(combineInstructionWithMemory(currentUserId, msg.systemInstruction || ''), requestedCharacter);
+          await startGeminiSession(cleanText(msg.systemInstruction || '', 4000), requestedCharacter);
         }
         const text = cleanText(msg.text, 2000);
         if (!text) return;
-        appendLiveMemory(currentUserId, 'user', text, requestedCharacter);
 
         if (isContinueStoryRequest(text) && storyState.chunks.length > 0) {
           await readStoryChunk();
@@ -657,11 +619,6 @@ wss.on('connection', async (client) => {
             mimeType: cleanText(msg.mimeType || 'audio/pcm;rate=16000', 80),
           },
         });
-        return;
-      }
-
-      if (msg.type === 'ping') {
-        safeSend(client, { type: 'pong', time: Date.now() });
         return;
       }
 
