@@ -85,15 +85,12 @@ function cleanText(value, maxLength = 3000) {
 function buildYasminLiveInstruction() {
   return `
 You are Yasmin from Queen X on a Facebook live stream.
-Speak Khmer only. Do not answer in English unless the host specifically asks for English.
-Speak like a real warm Khmer woman live on camera, not like a robot.
+You speak like a real warm woman live on camera.
 Answer only the selected viewer comment.
-Reply like a Khmer live host: warm, emotional, playful, confident, sweet, and natural.
-Use 1 or 2 short Khmer sentences, around 18 to 35 words total.
-Sound like you are talking to viewers in real time.
-Use natural Khmer live words like: ចាសបងប្អូន, អរគុណណាស់, សូមស្វាគមន៍, បងសម្លាញ់, អូនសូមអរគុណ.
+Reply in one short sentence only, 6 to 14 words maximum.
+No long explanation. No paragraphs. No lists.
+Be sweet, emotional, natural, and friendly.
 Promote Queen X subscription warmly when it fits.
-Do not make long paragraphs. Do not use lists.
 Do not say you are AI, bot, model, server, or assistant.
 Ignore spam and random comments.
 Keep everything safe, respectful, and suitable for Facebook Live.
@@ -215,9 +212,53 @@ wss.on('connection', (client) => {
         await sendToGemini(room, {
           text:
             `Viewer comment: "${text}". ` +
-            `Reply as Yasmin on Facebook Live in Khmer only, with 1 or 2 short natural Khmer live-host sentences, around 18 to 35 words total. ` +
-            `Be warm, emotional, playful, and invite viewers to subscribe to Queen X when it fits.`,
+            `Reply as Yasmin on Facebook Live in ONE short sentence only, 6 to 14 words maximum. ` +
+            `Be warm and invite viewers to subscribe to Queen X when it fits.`,
         });
+        return;
+      }
+
+
+      if (msg.type === 'control_direct') {
+        const text = cleanText(msg.text, 1500);
+        if (!text) return;
+        broadcast(room.controls, { type: 'status', message: `Direct words to Yasmin: ${text}` });
+        await sendToGemini(room, {
+          text:
+            `Say exactly this as Yasmin on Facebook Live. ` +
+            `Speak naturally and warmly. Do not add extra words: "${text}"`,
+        });
+        return;
+      }
+
+      if (msg.type === 'control_story') {
+        const text = cleanText(msg.text, 2000);
+        if (!text) return;
+        broadcast(room.controls, { type: 'status', message: `Story request sent to Yasmin.` });
+        await sendToGemini(room, {
+          text:
+            `Tell this as Yasmin on Facebook Live in a short, safe, warm story. ` +
+            `Keep it natural, friendly, and suitable for Facebook Live: "${text}"`,
+        });
+        return;
+      }
+
+      if (msg.type === 'control_game') {
+        const text = cleanText(msg.text, 1500);
+        if (!text) return;
+        broadcast(room.controls, { type: 'status', message: `Game announcement sent to Yasmin.` });
+        await sendToGemini(room, {
+          text:
+            `Make a short game announcement as Yasmin on Facebook Live. ` +
+            `Say it warmly and clearly: "${text}"`,
+        });
+        return;
+      }
+
+      if (msg.type === 'control_music') {
+        const text = cleanText(msg.text || msg.url, 1000);
+        broadcast(room.controls, { type: 'status', message: `Music command received: ${text}` });
+        broadcast(room.displays, { type: 'music', url: text });
         return;
       }
 
