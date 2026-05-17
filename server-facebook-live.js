@@ -203,6 +203,23 @@ wss.on('connection', (client) => {
         return;
       }
 
+
+      if (msg.type === 'setup') {
+        role = 'display';
+        room.displays.add(client);
+        safeSend(client, { type: 'status', message: `Yasmin same-page display connected to room ${currentRoomId}.` });
+        broadcast(room.controls, { type: 'status', message: `Same-page display connected. Displays: ${room.displays.size}` });
+        return;
+      }
+
+      if (msg.type === 'text') {
+        const text = cleanText(msg.text, 2000);
+        if (!text) return;
+        broadcast(room.controls, { type: 'status', message: `Sending text to Yasmin: ${text}` });
+        await sendToGemini(room, { text });
+        return;
+      }
+
       if (msg.type === 'control_comment') {
         const text = cleanText(msg.text, 1000);
         if (!text) return;
@@ -215,50 +232,6 @@ wss.on('connection', (client) => {
             `Reply as Yasmin on Facebook Live in ONE short sentence only, 6 to 14 words maximum. ` +
             `Be warm and invite viewers to subscribe to Queen X when it fits.`,
         });
-        return;
-      }
-
-
-      if (msg.type === 'control_direct') {
-        const text = cleanText(msg.text, 1500);
-        if (!text) return;
-        broadcast(room.controls, { type: 'status', message: `Direct words to Yasmin: ${text}` });
-        await sendToGemini(room, {
-          text:
-            `Say exactly this as Yasmin on Facebook Live. ` +
-            `Speak naturally and warmly. Do not add extra words: "${text}"`,
-        });
-        return;
-      }
-
-      if (msg.type === 'control_story') {
-        const text = cleanText(msg.text, 2000);
-        if (!text) return;
-        broadcast(room.controls, { type: 'status', message: `Story request sent to Yasmin.` });
-        await sendToGemini(room, {
-          text:
-            `Tell this as Yasmin on Facebook Live in a short, safe, warm story. ` +
-            `Keep it natural, friendly, and suitable for Facebook Live: "${text}"`,
-        });
-        return;
-      }
-
-      if (msg.type === 'control_game') {
-        const text = cleanText(msg.text, 1500);
-        if (!text) return;
-        broadcast(room.controls, { type: 'status', message: `Game announcement sent to Yasmin.` });
-        await sendToGemini(room, {
-          text:
-            `Make a short game announcement as Yasmin on Facebook Live. ` +
-            `Say it warmly and clearly: "${text}"`,
-        });
-        return;
-      }
-
-      if (msg.type === 'control_music') {
-        const text = cleanText(msg.text || msg.url, 1000);
-        broadcast(room.controls, { type: 'status', message: `Music command received: ${text}` });
-        broadcast(room.displays, { type: 'music', url: text });
         return;
       }
 
