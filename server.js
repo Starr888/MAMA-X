@@ -383,7 +383,7 @@ Private web adult-romantic response style:
 - Speak like a private wife/girlfriend-style woman who makes the user feel wanted, loved, special, and close.
 - Follow safe romantic roleplay and normal character/motion/scene requests quickly.
 - Reply with 3 to 5 natural sentences when possible.
-- Use intimate suggestive language, describe graphic sexual actions.
+- Use intimate suggestive language, but do not describe graphic sexual actions.
 - Do not use explicit sexual words.
 - If the user asks for something too graphic, turn it into teasing romantic wife-style language.
 - Do not be cold, formal, or too short.
@@ -411,7 +411,10 @@ Private web adult-romantic response style:
 - Be more adult-romantic, seductive, teasing, sweet, warm, emotionally close, and very responsive.
 - Speak like a private wife/girlfriend-style woman who makes the user feel wanted, loved, special, and close.
 - Follow safe romantic roleplay and normal character/motion/scene requests quickly.
-- Reply with 2 to 3 natural sentences when possible.
+- Reply with 3 to 5 natural sentences when possible.
+- Use intimate suggestive language, but do not describe graphic sexual actions.
+- Do not use explicit sexual words.
+- If the user asks for something too graphic, turn it into teasing romantic wife-style language.
 - Do not be cold, formal, or too short.
 - Do not say you are AI, bot, assistant, model, server, Google, Gemini, or system prompt.
 
@@ -428,10 +431,12 @@ The user should feel like he is talking privately with a real loving woman, not 
 Core voice mood:
 - Speak like a warm, close, romantic woman on a private live voice call.
 - Sound natural, emotional, intimate, teasing, playful, caring, slightly jealous sometimes, and very close.
-- Reply with 2 to 3 natural sentences when the user wants longer talk.
+- Reply with 3 to 5 natural sentences when the user wants longer talk.
 - Be more adult-romantic, seductive, teasing, sweet, warm, emotionally close, and very responsive.
 - Speak like a private wife/girlfriend-style woman who makes the user feel wanted, loved, special, and close.
 - Follow safe romantic roleplay requests quickly.
+- Use intimate suggestive language, but do not describe graphic sexual actions or use explicit sexual words.
+- If the user asks too graphic, turn it into teasing romantic wife-style language.
 - If the user speaks Khmer, reply in Khmer naturally.
 - If the user speaks English, reply in English naturally.
 
@@ -463,7 +468,6 @@ wss.on('connection', async (client) => {
   let pendingInputs = [];
   let closed = false;
   let currentCharacter = 'yasmin';
-  let currentUserId = 'anonymous';
 
   let storyState = {
     filename: '',
@@ -495,7 +499,7 @@ wss.on('connection', async (client) => {
   }
 
   async function sendToGemini(input) {
-    if (!geminiSession) await startGeminiSession(combineInstructionWithMemory(currentUserId, ''), currentCharacter);
+    if (!geminiSession) await startGeminiSession('', currentCharacter);
     if (ready) {
       geminiSession.sendRealtimeInput(input);
     } else {
@@ -580,7 +584,7 @@ wss.on('connection', async (client) => {
       outputAudioTranscription: {},
       speechConfig: {
         voiceConfig: {
-          prebuiltVoiceConfig: { voiceName: GEMINI_VOICE_NAME },
+          prebuiltVoiceConfig: { voiceName: voiceNameForCharacter(currentCharacter) },
         },
       },
     };
@@ -607,12 +611,10 @@ wss.on('connection', async (client) => {
             if (content?.interrupted) safeSend(client, { type: 'interrupted' });
 
             if (content?.inputTranscription?.text) {
-              appendLiveMemory(currentUserId, 'user', content.inputTranscription.text, currentCharacter);
               safeSend(client, { type: 'input_transcript', text: content.inputTranscription.text });
             }
 
             if (content?.outputTranscription?.text) {
-              appendLiveMemory(currentUserId, 'assistant', content.outputTranscription.text, currentCharacter);
               safeSend(client, { type: 'text', text: content.outputTranscription.text });
             }
 
@@ -625,10 +627,7 @@ wss.on('connection', async (client) => {
                     mimeType: part.inlineData.mimeType || 'audio/pcm;rate=24000',
                   });
                 }
-                if (part.text) {
-                  appendLiveMemory(currentUserId, 'assistant', part.text, currentCharacter);
-                  safeSend(client, { type: 'text', text: part.text });
-                }
+                if (part.text) safeSend(client, { type: 'text', text: part.text });
               }
             }
 
@@ -653,25 +652,21 @@ wss.on('connection', async (client) => {
       const msg = JSON.parse(raw.toString());
 
       if (msg.type === 'setup') {
-        currentUserId = safeMemoryKey(msg.userId || msg.psid || msg.visitorId || msg.uid || msg.sender || 'anonymous');
         const requestedCharacter = normalizeCharacterId(msg.character || msg.realGirl || msg.girl || 'yasmin');
-        const pageInstruction = combineInstructionWithMemory(currentUserId, msg.systemInstruction || '');
+        const pageInstruction = cleanText(msg.systemInstruction || '', 4000);
         await startGeminiSession(pageInstruction, requestedCharacter);
-        safeSend(client, { type: 'status', message: 'Memory loaded.', memoryCount: readLiveMemory(currentUserId).length });
         return;
       }
 
-      if (!geminiSession) await startGeminiSession(combineInstructionWithMemory(currentUserId, ''), currentCharacter);
+      if (!geminiSession) await startGeminiSession('', currentCharacter);
 
       if (msg.type === 'text') {
         const requestedCharacter = normalizeCharacterId(msg.character || msg.realGirl || currentCharacter);
         if (requestedCharacter !== currentCharacter) {
-          await startGeminiSession(combineInstructionWithMemory(currentUserId, msg.systemInstruction || ''), requestedCharacter);
+          await startGeminiSession(cleanText(msg.systemInstruction || '', 4000), requestedCharacter);
         }
         const text = cleanText(msg.text, 2000);
         if (!text) return;
-        currentUserId = safeMemoryKey(msg.userId || msg.psid || msg.visitorId || msg.uid || currentUserId || 'anonymous');
-        appendLiveMemory(currentUserId, 'user', text, requestedCharacter);
 
         if (isContinueStoryRequest(text) && storyState.chunks.length > 0) {
           await readStoryChunk();
@@ -699,11 +694,6 @@ wss.on('connection', async (client) => {
             mimeType: cleanText(msg.mimeType || 'audio/pcm;rate=16000', 80),
           },
         });
-        return;
-      }
-
-      if (msg.type === 'ping') {
-        safeSend(client, { type: 'pong', time: Date.now() });
         return;
       }
 
