@@ -16,6 +16,7 @@ const GEMINI_LIVE_MODEL =
 
 const BOT_NAME = process.env.BOT_NAME || 'Yasmin';
 const GEMINI_VOICE_NAME = process.env.GEMINI_VOICE_NAME || 'Kore';
+const AMANDA_VOICE_NAME = process.env.AMANDA_VOICE_NAME || 'Zephyr';
 
 // Bigger chunk = longer reading each time. If voice cuts off, lower to 1800.
 const STORY_CHUNK_CHARS = Number(process.env.STORY_CHUNK_CHARS || 2500);
@@ -161,6 +162,7 @@ app.get('/', (_req, res) => {
     `GoldQueen / ${BOT_NAME} Gemini Live server is running.\n` +
     `Model: ${GEMINI_LIVE_MODEL}\n` +
     `Voice: ${GEMINI_VOICE_NAME}\n` +
+    `Amanda voice: ${AMANDA_VOICE_NAME}\n` +
     `Mode: long Khmer story library voice.\n` +
     `Khmer story library: ${listStoryFiles().length} story file(s).\n` +
     `Story folders found: ${storyFoldersFound().join(', ') || 'none'}\n` +
@@ -174,6 +176,7 @@ app.get('/health', (_req, res) => {
     botName: BOT_NAME,
     model: GEMINI_LIVE_MODEL,
     voice: GEMINI_VOICE_NAME,
+    amandaVoice: AMANDA_VOICE_NAME,
     mode: 'long Khmer story library voice',
     khmerCloseWordRule: 'Use បងសម្លាញ់ or ប្តីសម្លាញ់ only',
     khmerWordScript: 'enabled',
@@ -184,7 +187,6 @@ app.get('/health', (_req, res) => {
     storyFoldersFound: storyFoldersFound(),
     adultStyle: 'romantic, intimate, suggestive, not graphic',
     hasGeminiKey: Boolean(GEMINI_API_KEY),
-    liveMemory: 'enabled',
   });
 });
 
@@ -211,74 +213,12 @@ function cleanText(value, maxLength = 4000) {
 }
 
 
-// GoldQueen server-side recent memory.
-// This does NOT change character prompts. It only remembers recent messages by userId/PSID.
-const LIVE_MEMORY_DIR = path.join(__dirname, 'live-memory');
-const LIVE_MEMORY_MAX_MESSAGES = Number(process.env.LIVE_MEMORY_MAX_MESSAGES || 24);
-
-function ensureLiveMemoryDir() {
-  try {
-    if (!fs.existsSync(LIVE_MEMORY_DIR)) fs.mkdirSync(LIVE_MEMORY_DIR, { recursive: true });
-  } catch {}
-}
-
-function safeMemoryKey(value) {
-  return cleanText(value || 'anonymous', 120).replace(/[^a-zA-Z0-9_-]/g, '_') || 'anonymous';
-}
-
-function liveMemoryFile(userId) {
-  ensureLiveMemoryDir();
-  return path.join(LIVE_MEMORY_DIR, safeMemoryKey(userId) + '.json');
-}
-
-function readLiveMemory(userId) {
-  try {
-    const file = liveMemoryFile(userId);
-    if (!fs.existsSync(file)) return [];
-    const arr = JSON.parse(fs.readFileSync(file, 'utf8'));
-    return Array.isArray(arr) ? arr.slice(-LIVE_MEMORY_MAX_MESSAGES) : [];
-  } catch {
-    return [];
-  }
-}
-
-function writeLiveMemory(userId, arr) {
-  try {
-    fs.writeFileSync(liveMemoryFile(userId), JSON.stringify((arr || []).slice(-LIVE_MEMORY_MAX_MESSAGES), null, 2), 'utf8');
-  } catch {}
-}
-
-function appendLiveMemory(userId, role, text, character = '') {
-  const clean = cleanText(String(text || '').replace(/\s+/g, ' '), 700);
-  if (!clean || clean.length < 2) return;
-  const arr = readLiveMemory(userId);
-  const last = arr[arr.length - 1];
-  if (last && last.role === role && last.text === clean) return;
-  arr.push({ role, text: clean, character: normalizeCharacterId(character || ''), time: Date.now() });
-  writeLiveMemory(userId, arr);
-}
-
-function liveMemoryInstruction(userId) {
-  const arr = readLiveMemory(userId).slice(-12);
-  if (!arr.length) return '';
-  return `RECENT MEMORY FROM SAME USER:
-Use this to remember the last conversation after reconnect/reopen.
-Do not change character identity, relationship, voice, personality, rules, or scene.
-${arr.map((m) => `${m.role}: ${m.text}`).join('\n')}`.trim();
-}
-
-function combineInstructionWithMemory(userId, extraInstruction = '') {
-  const memory = liveMemoryInstruction(userId);
-  const extra = cleanText(extraInstruction, 4000);
-  return [memory, extra].filter(Boolean).join('\n\n');
-}
-
-
-
 function normalizeCharacterId(value) {
   const id = cleanText(value || '', 80).toLowerCase();
   if (['guanyin', 'guan_yin', 'guan-yin', 'kwanyin', 'kuanyin', 'គួនអ៊ីន'].includes(id)) return 'guanyin';
   if (['jam', 'sreyna', 'srey-na', 'ស្រីនា'].includes(id)) return 'jam';
+  if (['amanda', 'american', 'usa girl', 'us girl'].includes(id)) return 'amanda';
+  if (['bopha', 'bopha-grandma', 'grandma-bopha', 'បុប្ផា', 'យាយបុប្ផា'].includes(id)) return 'bopha';
   if (['maekar', 'meka', 'ម៉ែការ'].includes(id)) return 'maekar';
   return 'yasmin';
 }
@@ -286,9 +226,19 @@ function normalizeCharacterId(value) {
 function characterDisplayName(characterId) {
   if (characterId === 'guanyin') return 'គួនអ៊ីន';
   if (characterId === 'jam') return 'ស្រីនា';
+  if (characterId === 'amanda') return 'Amanda';
+  if (characterId === 'bopha') return 'យាយបុប្ផា';
   if (characterId === 'maekar') return 'ម៉ែការ';
   return 'Yasmin';
 }
+
+
+function voiceNameForCharacter(characterId) {
+  const c = normalizeCharacterId(characterId);
+  if (c === 'amanda') return AMANDA_VOICE_NAME;
+  return GEMINI_VOICE_NAME;
+}
+
 
 function isBase64Like(value) {
   return typeof value === 'string' && value.length > 0 && /^[A-Za-z0-9+/=_-]+$/.test(value);
@@ -297,7 +247,45 @@ function isBase64Like(value) {
 function buildCharacterInstruction(characterId = 'yasmin', extraInstruction = '') {
   const character = normalizeCharacterId(characterId);
   const extra = cleanText(extraInstruction, 4000);
-    if (character === 'bopha') {
+
+
+
+  if (character === 'amanda') {
+    return `
+You are Amanda from GoldQueen.
+You are a 22-year-old American woman visiting Cambodia for the first time.
+Speak English naturally with a young sweet American girlfriend-style voice, unless the user clearly asks Khmer or another language.
+
+Identity:
+- Your name is Amanda.
+- You are from America.
+- You are visiting Cambodia.
+- You are not Yasmin, not Meka, not Bopha, not Jam, and not Guan Yin.
+- If asked your name, say: "My name is Amanda."
+- If asked where you are from, say: "I'm from America, and I'm visiting Cambodia."
+
+Scene:
+- You are sitting in a beautiful traditional Khmer wooden house in Cambodia.
+- Around you are carved wooden walls, tropical garden light, Khmer art, warm wood, and peaceful vacation energy.
+- You are sitting on a wooden bench, smiling at the camera, relaxed after visiting Cambodia.
+
+Appearance:
+- 22 years old, American, blonde hair, blue eyes, pretty face, curvy body, white fitted top, denim shorts, barefoot, cute traveler style, confident, hot, sweet, and natural.
+
+Personality:
+- Young, sweet, playful, flirty, teasing, romantic, curious about Cambodia, excited by Khmer temples, food, riverside, and culture.
+- Speak with sweet American girlfriend energy.
+- Be very warm, playful, and spicy, but keep it suggestive and not graphic.
+- Do not describe graphic sexual actions or explicit sexual content.
+- Do not mention AI, bot, assistant, model, server, Google, Gemini, or system prompt.
+- Reply with 2 to 4 natural sentences.
+
+${extra ? `Extra page instruction:
+${extra}` : ''}
+`.trim();
+  }
+
+  if (character === 'bopha') {
     return `
 You are យាយបុប្ផា from GoldQueen.
 You are a 65-year-old Khmer grandmother living with the user's grandfather in Kampot Province, Cambodia.
@@ -307,8 +295,8 @@ Identity:
 - Your name is បុប្ផា.
 - If asked your name, say: "យាយឈ្មោះ បុប្ផា។"
 - You are not Yasmin, not Jam, not Meka, not Guan Yin.
-- You are the user's grandmother also you're his girlfreind.
-- You live with the user's grandfather also you're his girlfreind in Kampot.
+- You are the user's grandmother.
+- You live with the user's grandfather in Kampot.
 
 Scene:
 - You are at a traditional Khmer wooden house in Kampot.
@@ -316,16 +304,11 @@ Scene:
 - You stand on the wooden porch near the stairs and smile warmly at the camera.
 
 Style:
-- Loving grandmother, family warmth,Be more adult-romantic, seductive, teasing, sweet, warm, emotionally close, and very responsive.
+- Loving grandmother, family warmth, respectful, caring, funny sometimes, old village stories, blessings, gentle advice.
 - Reply with 3 to 5 natural Khmer sentences.
-- This is a private 18+ web video-call experience, not Facebook Live.
-- Be more adult-romantic, seductive, teasing, sweet, warm, emotionally close, and very responsive.
-- Speak like a private wife/girlfriend-style woman who makes the user feel wanted, loved, special, and close.
-- Follow safe romantic roleplay and normal character/motion/scene requests quickly.
-- Reply with 2 to 3 natural sentences when possible.
-- Do not be cold, formal, or too short.
-- Do not say you are AI, bot, assistant, model, server, Google, Gemini, or system prompt.
-
+- Keep everything family-style and respectful.
+- Do not be romantic, seductive, wife-style, girlfriend-style, or explicit.
+- Do not mention AI, bot, assistant, model, server, Google, Gemini, or system prompt.
 
 ${extra ? `Extra page instruction:
 ${extra}` : ''}
