@@ -16,7 +16,7 @@ const GEMINI_LIVE_MODEL =
 
 const BOT_NAME = process.env.BOT_NAME || 'Yasmin';
 const GEMINI_VOICE_NAME = process.env.GEMINI_VOICE_NAME || 'Kore';
-const AMANDA_VOICE_NAME = process.env.AMANDA_VOICE_NAME || 'Zephyr';
+const AMANDA_VOICE_NAME = process.env.AMANDA_VOICE_NAME || 'Puck';
 
 // Bigger chunk = longer reading each time. If voice cuts off, lower to 1800.
 const STORY_CHUNK_CHARS = Number(process.env.STORY_CHUNK_CHARS || 2500);
