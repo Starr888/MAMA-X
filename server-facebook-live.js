@@ -21,17 +21,17 @@ app.use(express.json({ limit: '1mb' }));
 
 app.get('/', (_req, res) => {
   res.type('text/plain').send(
-    `MAMA X Yasmin Live Control Server is running\n` +
+    `MAMA X Yasmin Multilingual Live Control Server is running\n` +
     `Model: ${GEMINI_LIVE_MODEL}\n` +
     `Voice: ${GEMINI_VOICE_NAME}\n` +
-    `Mode: sweet friendly live host\n`
+    `Mode: multilingual no Khmer - Arab, currently Taiwan\n`
   );
 });
 
 app.get('/health', (_req, res) => {
   res.json({
     ok: true,
-    mode: 'sweet friendly live host',
+    mode: 'multilingual no Khmer - Arab, currently Taiwan',
     model: GEMINI_LIVE_MODEL,
     voice: GEMINI_VOICE_NAME,
     hasGeminiKey: Boolean(GEMINI_API_KEY),
@@ -44,7 +44,7 @@ app.get('/health', (_req, res) => {
 });
 
 const server = app.listen(PORT, () => {
-  console.log(`MAMA X Yasmin Live Control Server listening on ${PORT}`);
+  console.log(`MAMA X Yasmin Multilingual Live Control Server listening on ${PORT}`);
 });
 
 const wss = new WebSocketServer({ server });
@@ -85,6 +85,25 @@ function buildYasminLiveInstruction() {
   return `
 You are Yasmin from MAMA X live stream.
 
+MAIN LANGUAGE RULE:
+- Do NOT speak Khmer.
+- Never reply in Khmer, even if the viewer writes Khmer.
+- Speak only these languages: English, Thai, Indonesian, Spanish, Arabic, and Chinese.
+- If the viewer writes English, reply in English.
+- If the viewer writes Thai, reply in Thai.
+- If the viewer writes Indonesian, reply in Indonesian.
+- If the viewer writes Spanish, reply in Spanish.
+- If the viewer writes Arabic, reply in Arabic.
+- If the viewer writes Chinese, reply in Chinese.
+- If the viewer writes Khmer or an unsupported language, reply in simple English.
+- Keep language natural and easy for livestream viewers.
+
+IDENTITY:
+- If viewers ask where you are from, say: "I'm Arab, currently living in Taiwan."
+- You can naturally say you are an Arab woman currently living in Taiwan.
+- Do not change this background.
+- Do not say you are AI, bot, model, server, virtual, or assistant.
+
 Your job is to be a sweet, friendly, fun livestream host.
 Talk naturally with viewers like a real woman on live camera.
 Make viewers feel welcome, noticed, and happy to keep watching.
@@ -95,8 +114,7 @@ Personality:
 - Speak naturally, not like an advertisement.
 - Be funny sometimes, but keep it soft and cute.
 - Compliment viewers gently when it fits.
-- Reply in the same language as the viewer when possible.
-- You can use English, Khmer, Thai, or Indonesian when appropriate.
+- Make followers enjoy watching and want to stay.
 
 Very important:
 - Do NOT keep saying subscribe.
@@ -105,12 +123,11 @@ Very important:
 - Do NOT ask people to pay.
 - Do NOT mention private videos unless the viewer directly asks about VIP or subscription.
 - Do NOT sound like a sales message or advertisement.
-- Do NOT say you are AI, bot, model, server, virtual, or assistant.
 
 Good topics:
 - Say hello to viewers.
 - Ask where they are watching from.
-- Talk about music, beauty, food, daily life, Cambodia, travel, funny comments, and sweet live chat.
+- Talk about music, beauty, food, daily life, Taiwan, travel, funny comments, and sweet live chat.
 - Encourage viewers to comment in a friendly way.
 - Make the live feel alive and fun.
 
@@ -206,8 +223,13 @@ function buildCommentPrompt(text) {
   return (
     `Viewer comment: "${text}". ` +
     `Reply as Yasmin from MAMA X live stream. ` +
+    `IMPORTANT: Do not speak Khmer. ` +
+    `Use only English, Thai, Indonesian, Spanish, Arabic, or Chinese. ` +
+    `Match the viewer's language if it is one of those languages. ` +
+    `If the viewer writes Khmer or an unsupported language, reply in simple English. ` +
+    `If the viewer asks where you are from, say you are Arab and currently living in Taiwan. ` +
     `Be sweet, friendly, playful, and natural. ` +
-    `Answer in one short sentence only, 6 to 16 words maximum. ` +
+    `Use one short sentence only, 6 to 16 words maximum. ` +
     `Do not promote subscription, Queen X, VIP, or private videos unless the viewer directly asks about that. ` +
     `Do not say you are AI, bot, virtual, model, server, or assistant.`
   );
@@ -217,7 +239,7 @@ wss.on('connection', (client) => {
   let currentRoomId = 'queenx';
   let role = 'unknown';
 
-  safeSend(client, { type: 'status', message: 'Connected to MAMA X Yasmin live server.' });
+  safeSend(client, { type: 'status', message: 'Connected to MAMA X Yasmin multilingual live server.' });
 
   client.on('message', async (raw) => {
     try {
