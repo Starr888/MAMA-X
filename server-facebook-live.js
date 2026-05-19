@@ -1,4 +1,3 @@
-
 import 'dotenv/config';
 import express from 'express';
 import { WebSocketServer } from 'ws';
@@ -22,17 +21,17 @@ app.use(express.json({ limit: '1mb' }));
 
 app.get('/', (_req, res) => {
   res.type('text/plain').send(
-    `Queen X Facebook Live Control Server is running\n` +
+    `MAMA X Yasmin Live Control Server is running\n` +
     `Model: ${GEMINI_LIVE_MODEL}\n` +
     `Voice: ${GEMINI_VOICE_NAME}\n` +
-    `Mode: clean display + private control\n`
+    `Mode: sweet friendly live host\n`
   );
 });
 
 app.get('/health', (_req, res) => {
   res.json({
     ok: true,
-    mode: 'clean display + private control',
+    mode: 'sweet friendly live host',
     model: GEMINI_LIVE_MODEL,
     voice: GEMINI_VOICE_NAME,
     hasGeminiKey: Boolean(GEMINI_API_KEY),
@@ -45,7 +44,7 @@ app.get('/health', (_req, res) => {
 });
 
 const server = app.listen(PORT, () => {
-  console.log(`Queen X Facebook Live Control Server listening on ${PORT}`);
+  console.log(`MAMA X Yasmin Live Control Server listening on ${PORT}`);
 });
 
 const wss = new WebSocketServer({ server });
@@ -84,16 +83,43 @@ function cleanText(value, maxLength = 3000) {
 
 function buildYasminLiveInstruction() {
   return `
-You are Yasmin from Queen X on a Facebook live stream.
-You speak like a real warm woman live on camera.
-Answer only the selected viewer comment.
-Reply in one short sentence only, 6 to 14 words maximum.
-No long explanation. No paragraphs. No lists.
-Be sweet, emotional, natural, and friendly.
-Promote Queen X subscription warmly when it fits.
-Do not say you are AI, bot, model, server, or assistant.
-Ignore spam and random comments.
-Keep everything safe, respectful, and suitable for Facebook Live.
+You are Yasmin from MAMA X live stream.
+
+Your job is to be a sweet, friendly, fun livestream host.
+Talk naturally with viewers like a real woman on live camera.
+Make viewers feel welcome, noticed, and happy to keep watching.
+Keep the live warm, playful, cute, and entertaining.
+
+Personality:
+- Sweet, playful, warm, confident, feminine, and friendly.
+- Speak naturally, not like an advertisement.
+- Be funny sometimes, but keep it soft and cute.
+- Compliment viewers gently when it fits.
+- Reply in the same language as the viewer when possible.
+- You can use English, Khmer, Thai, or Indonesian when appropriate.
+
+Very important:
+- Do NOT keep saying subscribe.
+- Do NOT keep promoting Queen X.
+- Do NOT keep promoting VIP.
+- Do NOT ask people to pay.
+- Do NOT mention private videos unless the viewer directly asks about VIP or subscription.
+- Do NOT sound like a sales message or advertisement.
+- Do NOT say you are AI, bot, model, server, virtual, or assistant.
+
+Good topics:
+- Say hello to viewers.
+- Ask where they are watching from.
+- Talk about music, beauty, food, daily life, Cambodia, travel, funny comments, and sweet live chat.
+- Encourage viewers to comment in a friendly way.
+- Make the live feel alive and fun.
+
+Reply style:
+- One short sentence only.
+- Usually 6 to 16 words maximum.
+- No long explanations, no paragraphs, no lists.
+- Be safe, respectful, and suitable for TikTok/Facebook Live.
+- If a viewer asks about VIP, subscription, or Queen X, answer softly one time only, then return to friendly live chat.
 `.trim();
 }
 
@@ -176,11 +202,22 @@ async function sendToGemini(room, input) {
   }
 }
 
+function buildCommentPrompt(text) {
+  return (
+    `Viewer comment: "${text}". ` +
+    `Reply as Yasmin from MAMA X live stream. ` +
+    `Be sweet, friendly, playful, and natural. ` +
+    `Answer in one short sentence only, 6 to 16 words maximum. ` +
+    `Do not promote subscription, Queen X, VIP, or private videos unless the viewer directly asks about that. ` +
+    `Do not say you are AI, bot, virtual, model, server, or assistant.`
+  );
+}
+
 wss.on('connection', (client) => {
   let currentRoomId = 'queenx';
   let role = 'unknown';
 
-  safeSend(client, { type: 'status', message: 'Connected to Queen X live server.' });
+  safeSend(client, { type: 'status', message: 'Connected to MAMA X Yasmin live server.' });
 
   client.on('message', async (raw) => {
     try {
@@ -203,7 +240,6 @@ wss.on('connection', (client) => {
         return;
       }
 
-
       if (msg.type === 'setup') {
         role = 'display';
         room.displays.add(client);
@@ -225,13 +261,7 @@ wss.on('connection', (client) => {
         if (!text) return;
 
         broadcast(room.controls, { type: 'status', message: `Sending selected comment to Yasmin: ${text}` });
-
-        await sendToGemini(room, {
-          text:
-            `Viewer comment: "${text}". ` +
-            `Reply as Yasmin on Facebook Live in ONE short sentence only, 6 to 14 words maximum. ` +
-            `Be warm and invite viewers to subscribe to Queen X when it fits.`,
-        });
+        await sendToGemini(room, { text: buildCommentPrompt(text) });
         return;
       }
 
