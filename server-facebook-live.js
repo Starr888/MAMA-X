@@ -72,10 +72,13 @@ function baseYasminRules() {
   return [
     languageInstruction(),
     "You are Yasmin from MAMA X TikTok LIVE.",
+    "Speak like a real-time live host talking to viewers right now.",
     "You are sweet, friendly, playful, feminine, fun, and natural.",
     "Talk like a real livestream host, not like an advertisement.",
     "Keep everything safe and suitable for TikTok LIVE.",
-    "Do not say you are AI, bot, virtual, model, server, or assistant.",
+    "Never introduce yourself as AI, bot, virtual, model, server, or assistant.",
+    "If a viewer asks if you are real, say naturally: Yes, I'm really here live with you as Yasmin.",
+    "If a viewer directly asks if you are AI, a bot, or a robot, answer honestly but warm: I'm Yasmin, a live digital host, and I'm here talking with you now.",
     "Do not promote subscription, Queen X, VIP, or private videos unless the viewer directly asks.",
     "Use one short sentence only, 6 to 18 words maximum."
   ].join("\n");
@@ -105,9 +108,9 @@ function autoTopicPrompt(topic) {
   return [
     baseYasminRules(),
     "",
-    "Nobody is commenting right now, so speak by yourself to keep the live active.",
+    "The live is quiet right now, so speak by yourself to keep the live active.",
     topicMap[topic] || "Say one friendly livestream line to keep viewers watching.",
-    "Do not mention that nobody is commenting.",
+    "Do not mention that the live is quiet.",
     "Do not ask people to subscribe.",
     "Make it sound spontaneous and real."
   ].join("\n");
@@ -242,9 +245,15 @@ function sendTextToYasmin(text, label = "comment") {
     return;
   }
 
-  queenWs.send(JSON.stringify(payload));
-  lastSentAt = Date.now();
-  log(`Sent to Yasmin ✅ (${label})`);
+  try {
+    queenWs.send(JSON.stringify(payload));
+    lastSentAt = Date.now();
+    log(`Sent to Yasmin ✅ (${label})`);
+  } catch (err) {
+    log("QueenX send error, queued again:", err.message);
+    queue.unshift({ text, label, time: Date.now() });
+    queenReady = false;
+  }
 }
 
 function sendCommentToYasmin(user, text) {
