@@ -1,11 +1,16 @@
 /*
-  Yasmin TikTok Auto Bot - Autopilot Mode
-  TikFinity LIVE comments -> QueenX Render WebSocket -> Yasmin speaks.
-  Also makes Yasmin talk by herself when comments are quiet.
+  Yasmin TikTok Auto Bot - Render + Local Fixed Version
+  - Adds HTTP health server so Render Web Service deploy does not fail for missing PORT.
+  - TikFinity LIVE comments -> QueenX Render WebSocket -> Yasmin speaks.
+  - Also makes Yasmin talk by herself when comments are quiet.
 */
 
 const fs = require("fs");
+const http = require("http");
 const WebSocket = require("ws");
+
+process.on("uncaughtException", (err) => console.error("UNCAUGHT EXCEPTION:", err && err.stack ? err.stack : err));
+process.on("unhandledRejection", (err) => console.error("UNHANDLED REJECTION:", err && err.stack ? err.stack : err));
 
 function loadEnvFile() {
   if (!fs.existsSync(".env")) return;
@@ -20,6 +25,7 @@ function loadEnvFile() {
 loadEnvFile();
 
 const CONFIG = {
+  port: Number(process.env.PORT || 10000),
   tikfinityWs: process.env.TIKFINITY_WS || "ws://127.0.0.1:21213/",
   queenxWs: process.env.QUEENX_WS || "wss://queenx-live.onrender.com",
   room: process.env.ROOM || "queenx",
@@ -58,13 +64,45 @@ function log(...args) {
   console.log(new Date().toLocaleTimeString(), "-", ...args);
 }
 
+function startHealthServer() {
+  const server = http.createServer((req, res) => {
+    res.setHeader("Content-Type", "application/json; charset=utf-8");
+    res.end(JSON.stringify({
+      ok: true,
+      service: "yasmin-autopilot",
+      character: CONFIG.character,
+      room: CONFIG.room,
+      queenxConnected: queenReady,
+      queueLength: queue.length,
+      uptimeSeconds: Math.round(process.uptime())
+    }));
+  });
+
+  server.listen(CONFIG.port, "0.0.0.0", () => {
+    log(`Health server listening on 0.0.0.0:${CONFIG.port} ✅`);
+  });
+
+  server.on("error", (err) => {
+    console.error("Health server error:", err && err.stack ? err.stack : err);
+  });
+}
+
+function validWsUrl(url) {
+  try {
+    const u = new URL(url);
+    return u.protocol === "ws:" || u.protocol === "wss:";
+  } catch (_) {
+    return false;
+  }
+}
+
 function languageInstruction() {
   return [
     "Do NOT speak Khmer.",
     "Use only English, Thai, Indonesian, Spanish, Arabic, or Chinese.",
     "Match the viewer's language if it is one of those languages.",
     "If the viewer writes Khmer or an unsupported language, reply in simple English.",
-    "If the viewer asks where you are from, say: I'm Arab, currently living in Taiwan."
+    "If the viewer asks where you are from, say: I'm Arab-style Yasmin, live from Taiwan tonight."
   ].join(" ");
 }
 
@@ -75,7 +113,9 @@ function baseYasminRules() {
     "You are sweet, friendly, playful, feminine, fun, and natural.",
     "Talk like a real livestream host, not like an advertisement.",
     "Keep everything safe and suitable for TikTok LIVE.",
-    "Do not say you are AI, bot, virtual, model, server, or assistant.",
+    "Never introduce yourself as AI, bot, virtual, model, server, or assistant.",
+    "If someone asks if you are real, say you are really here live as Yasmin talking with them tonight.",
+    "If someone directly asks if you are AI or a bot, answer honestly but warmly: I'm Yasmin, your live digital host, here talking with you now.",
     "Do not promote subscription, Queen X, VIP, or private videos unless the viewer directly asks.",
     "Use one short sentence only, 6 to 18 words maximum."
   ].join("\n");
@@ -105,7 +145,7 @@ function autoTopicPrompt(topic) {
   return [
     baseYasminRules(),
     "",
-    "Nobody is commenting right now, so speak by yourself to keep the live active.",
+    "Speak by yourself to keep the live active.",
     topicMap[topic] || "Say one friendly livestream line to keep viewers watching.",
     "Do not mention that nobody is commenting.",
     "Do not ask people to subscribe.",
@@ -189,6 +229,10 @@ function shouldAnswer(user, text) {
 }
 
 function connectQueenX() {
+  if (!validWsUrl(CONFIG.queenxWs)) {
+    log("QUEENX_WS is not a valid ws/wss URL:", CONFIG.queenxWs);
+    return;
+  }
   log("Connecting QueenX:", CONFIG.queenxWs);
   queenWs = new WebSocket(CONFIG.queenxWs);
 
@@ -296,6 +340,11 @@ function maybeAutoTalk() {
 setInterval(maybeAutoTalk, 1000);
 
 function connectTikFinity() {
+  if (!validWsUrl(CONFIG.tikfinityWs)) {
+    log("TIKFINITY_WS is not a valid ws/wss URL:", CONFIG.tikfinityWs);
+    return;
+  }
+
   log("Connecting TikFinity:", CONFIG.tikfinityWs);
   tikWs = new WebSocket(CONFIG.tikfinityWs);
 
@@ -323,7 +372,7 @@ function connectTikFinity() {
 
   tikWs.on("error", (err) => {
     log("TikFinity WS error:", err.message);
-    log("Make sure TikFinity Desktop is open and connected to your LIVE. Default port is usually 21213.");
+    log("If this is on Render, 127.0.0.1 cannot reach TikFinity on your PC. Run this bot locally for TikFinity comments.");
   });
 }
 
@@ -334,8 +383,11 @@ function testMode() {
   return true;
 }
 
+startHealthServer();
+
 log("Yasmin TikTok Auto Bot AUTOPILOT starting...");
 log("Settings:", {
+  port: CONFIG.port,
   tikfinityWs: CONFIG.tikfinityWs,
   queenxWs: CONFIG.queenxWs,
   room: CONFIG.room,
