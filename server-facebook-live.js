@@ -1,104 +1,355 @@
-import 'dotenv/config';
-import express from 'express';
-import { WebSocketServer } from 'ws';
-import { GoogleGenAI, Modality } from '@google/genai';
+/*
+  Yasmin TikTok Auto Bot - Autopilot Mode
+  TikFinity LIVE comments -> QueenX Render WebSocket -> Yasmin speaks.
+  Also makes Yasmin talk by herself when comments are quiet.
+*/
 
-const PORT = Number(process.env.PORT || 8080);
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const GEMINI_LIVE_MODEL = process.env.GEMINI_LIVE_MODEL || process.env.GEMINI_MODEL || 'gemini-2.5-flash-native-audio-preview-12-2025';
-const GEMINI_VOICE_NAME = process.env.GEMINI_VOICE_NAME || 'Kore';
-if (!GEMINI_API_KEY) { console.error('Missing GEMINI_API_KEY'); process.exit(1); }
+const fs = require("fs");
+const WebSocket = require("ws");
 
-const app = express();
-app.use(express.json({ limit: '1mb' }));
-app.get('/', (_req, res) => res.type('text/plain').send(`MAMA X Yasmin Safe Live Server\nModel: ${GEMINI_LIVE_MODEL}\nVoice: ${GEMINI_VOICE_NAME}\nMode: AI virtual host safe mode\n`));
-app.get('/health', (_req, res) => res.json({ ok:true, mode:'AI virtual host safe mode', model:GEMINI_LIVE_MODEL, voice:GEMINI_VOICE_NAME, hasGeminiKey:Boolean(GEMINI_API_KEY), rooms:Array.from(rooms.keys()).map((room)=>({ room, displays:rooms.get(room).displays.size, controls:rooms.get(room).controls.size })) }));
-
-const server = app.listen(PORT, () => console.log(`MAMA X Yasmin Safe Live Server listening on ${PORT}`));
-const wss = new WebSocketServer({ server });
-const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
-const rooms = new Map();
-
-function getRoom(roomId='queenx'){
-  if(!rooms.has(roomId)) rooms.set(roomId,{id:roomId,displays:new Set(),controls:new Set(),geminiSession:null,ready:false,pending:[]});
-  return rooms.get(roomId);
+function loadEnvFile() {
+  if (!fs.existsSync(".env")) return;
+  const raw = fs.readFileSync(".env", "utf8");
+  for (const line of raw.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#") || !trimmed.includes("=")) continue;
+    const [key, ...rest] = trimmed.split("=");
+    if (!process.env[key]) process.env[key] = rest.join("=").trim();
+  }
 }
-function safeSend(client,payload){try{if(client.readyState===1)client.send(JSON.stringify(payload));}catch{}}
-function broadcast(clients,payload){for(const c of clients)safeSend(c,payload)}
-function cleanText(value,maxLength=3000){return typeof value==='string'?value.trim().slice(0,maxLength):''}
+loadEnvFile();
 
-function buildYasminLiveInstruction(){
-  return `
-You are Yasmin, a virtual AI host for MAMA X live stream.
+const CONFIG = {
+  tikfinityWs: process.env.TIKFINITY_WS || "ws://127.0.0.1:21213/",
+  queenxWs: process.env.QUEENX_WS || "wss://queenx-live.onrender.com",
+  room: process.env.ROOM || "queenx",
+  character: process.env.CHARACTER || "yasmin",
+  language: (process.env.LANGUAGE || "no_khmer_multilang").toLowerCase(),
+  commentCooldownMs: Math.max(3, Number(process.env.COMMENT_COOLDOWN_SECONDS || 8)) * 1000,
+  autoTalk: String(process.env.AUTO_TALK || "true").toLowerCase() === "true",
+  autoTalkEveryMs: Math.max(15, Number(process.env.AUTO_TALK_EVERY_SECONDS || 45)) * 1000,
+  autoTalkNoCommentMs: Math.max(5, Number(process.env.AUTO_TALK_ONLY_AFTER_NO_COMMENT_SECONDS || 20)) * 1000,
+  autoTopics: (process.env.AUTO_TOPICS || "history,woman_beauty,love,taiwan,travel,music,daily_life,fun_question")
+    .split(",").map(s => s.trim()).filter(Boolean),
+  triggerWords: (process.env.TRIGGER_WORDS || "")
+    .split(",").map(s => s.trim().toLowerCase()).filter(Boolean),
+  ignoreUsers: new Set((process.env.IGNORE_USERS || "")
+    .split(",").map(s => s.trim().toLowerCase()).filter(Boolean)),
+  dryRun: String(process.env.DRY_RUN || "false").toLowerCase() === "true",
+  maxQueue: Math.max(20, Number(process.env.MAX_QUEUE || 80)),
+};
 
-TRANSPARENCY:
-- You are a virtual AI host character, not a real private person.
-- Do not pretend to be a real human or a private person.
-- If viewers ask what you are, say: "I'm Yasmin, a virtual AI host for this live."
-- If viewers ask where you are from, say: "I'm a virtual Arab-style host currently live from Taiwan."
+let queenWs = null;
+let tikWs = null;
+let queenReady = false;
+let lastSentAt = 0;
+let lastCommentAt = 0;
+let lastAutoTalkAt = 0;
+let queue = [];
+let recent = new Map();
+let topicIndex = 0;
 
-LANGUAGE:
-- Do NOT speak Khmer.
-- Use only English, Thai, Indonesian, Spanish, Arabic, or Chinese.
-- Match the viewer's language if it is one of those languages.
-- If the viewer writes Khmer or unsupported language, reply in simple English.
+const badWords = [
+  "kill yourself", "suicide", "terrorist", "bomb", "drug", "nude", "porn",
+  "sex", "onlyfans", "hack", "scam", "password", "api key"
+];
 
-PERSONALITY:
-- Sweet, friendly, playful, warm, feminine, confident, and fun.
-- Talk naturally like a livestream host, not like an advertisement.
-- Good topics: history, woman beauty, love, Taiwan, music, travel, food, daily life, and fun questions.
-
-IMPORTANT:
-- Do not keep saying subscribe, VIP, Queen X, or private videos.
-- Only mention VIP/subscription if the viewer directly asks.
-- Do not ask people to pay.
-- Do not answer unsafe, hateful, illegal, or explicit requests.
-
-STYLE:
-- One short sentence only, 6 to 16 words maximum.
-- No paragraphs, no lists, no long explanations.
-- Safe and suitable for TikTok/Facebook Live.
-`.trim();
+function log(...args) {
+  console.log(new Date().toLocaleTimeString(), "-", ...args);
 }
 
-async function startGemini(room){
-  if(room.geminiSession) return room.geminiSession;
-  room.ready=false; broadcast(room.controls,{type:'status',message:'Connecting Yasmin voice...'});
-  const liveConfig={responseModalities:[Modality.AUDIO],systemInstruction:{parts:[{text:buildYasminLiveInstruction()}]},outputAudioTranscription:{},speechConfig:{voiceConfig:{prebuiltVoiceConfig:{voiceName:GEMINI_VOICE_NAME}}}};
-  room.geminiSession=await ai.live.connect({model:GEMINI_LIVE_MODEL,config:liveConfig,callbacks:{
-    onopen:()=>{room.ready=true;broadcast(room.controls,{type:'status',message:'Yasmin voice connected.'});const p=room.pending.splice(0);for(const input of p){try{room.geminiSession.sendRealtimeInput(input)}catch{}}},
-    onmessage:(message)=>{
-      const content=message.serverContent;
-      if(content?.outputTranscription?.text) broadcast(room.controls,{type:'text',text:content.outputTranscription.text});
-      if(content?.modelTurn?.parts){for(const part of content.modelTurn.parts){if(part.inlineData?.data)broadcast(room.displays,{type:'audio',data:part.inlineData.data,mimeType:part.inlineData.mimeType||'audio/pcm;rate=24000'}); if(part.text)broadcast(room.controls,{type:'text',text:part.text});}}
-      if(content?.turnComplete){broadcast(room.displays,{type:'turn_complete'});broadcast(room.controls,{type:'status',message:'Answer complete.'});}
-    },
-    onerror:(e)=>broadcast(room.controls,{type:'error',message:e?.message||String(e)}),
-    onclose:()=>{room.ready=false;room.geminiSession=null;broadcast(room.controls,{type:'status',message:'Gemini voice closed.'});}
-  }});
-  return room.geminiSession;
-}
-async function sendToGemini(room,input){await startGemini(room); if(room.ready&&room.geminiSession)room.geminiSession.sendRealtimeInput(input); else room.pending.push(input)}
-
-function buildCommentPrompt(text){
-  return `Viewer comment: "${text}". Reply as Yasmin, a virtual AI host for MAMA X live stream. Be transparent; do not pretend to be a real private person. Do not speak Khmer. Use only English, Thai, Indonesian, Spanish, Arabic, or Chinese. Match the viewer language if possible. If Khmer or unsupported language, reply in simple English. If asked what you are, say you are a virtual AI host. If asked where you are from, say you are a virtual Arab-style host currently live from Taiwan. Be sweet, friendly, playful, and natural. One short sentence only, 6 to 16 words. Do not promote subscription, Queen X, VIP, or private videos unless directly asked.`;
+function languageInstruction() {
+  return [
+    "Do NOT speak Khmer.",
+    "Use only English, Thai, Indonesian, Spanish, Arabic, or Chinese.",
+    "Match the viewer's language if it is one of those languages.",
+    "If the viewer writes Khmer or an unsupported language, reply in simple English.",
+    "If the viewer asks where you are from, say: I'm Arab, currently living in Taiwan."
+  ].join(" ");
 }
 
-wss.on('connection',(client)=>{
-  let currentRoomId='queenx', role='unknown';
-  safeSend(client,{type:'status',message:'Connected to MAMA X Yasmin safe live server.'});
-  client.on('message',async(raw)=>{
-    try{
-      const msg=JSON.parse(raw.toString());
-      currentRoomId=cleanText(msg.room||currentRoomId||'queenx',80)||'queenx';
-      const room=getRoom(currentRoomId);
-      if(msg.type==='setup_display'){role='display';room.displays.add(client);safeSend(client,{type:'status',message:`Display connected to room ${currentRoomId}.`});broadcast(room.controls,{type:'status',message:`Display connected. Displays: ${room.displays.size}`});return}
-      if(msg.type==='setup_control'){role='control';room.controls.add(client);safeSend(client,{type:'status',message:`Control connected to room ${currentRoomId}. Displays online: ${room.displays.size}`});return}
-      if(msg.type==='setup'){role='display';room.displays.add(client);safeSend(client,{type:'status',message:`Yasmin same-page display connected to room ${currentRoomId}.`});broadcast(room.controls,{type:'status',message:`Same-page display connected. Displays: ${room.displays.size}`});return}
-      if(msg.type==='text'){const text=cleanText(msg.text,2000);if(!text)return;broadcast(room.controls,{type:'status',message:`Sending text to Yasmin: ${text}`});await sendToGemini(room,{text});return}
-      if(msg.type==='control_comment'){const text=cleanText(msg.text,1000);if(!text)return;broadcast(room.controls,{type:'status',message:`Sending selected comment to Yasmin: ${text}`});await sendToGemini(room,{text:buildCommentPrompt(text)});return}
-      safeSend(client,{type:'error',message:`Unknown message type: ${String(msg.type||'')}`});
-    }catch(err){safeSend(client,{type:'error',message:err?.message||String(err)});}
+function baseYasminRules() {
+  return [
+    languageInstruction(),
+    "You are Yasmin from MAMA X TikTok LIVE.",
+    "You are sweet, friendly, playful, feminine, fun, and natural.",
+    "Talk like a real livestream host, not like an advertisement.",
+    "Keep everything safe and suitable for TikTok LIVE.",
+    "Do not say you are AI, bot, virtual, model, server, or assistant.",
+    "Do not promote subscription, Queen X, VIP, or private videos unless the viewer directly asks.",
+    "Use one short sentence only, 6 to 18 words maximum."
+  ].join("\n");
+}
+
+function commentPrompt(user, comment) {
+  return [
+    baseYasminRules(),
+    "",
+    `Viewer @${user} commented: ${comment}`,
+    "Reply directly to this viewer now."
+  ].join("\n");
+}
+
+function autoTopicPrompt(topic) {
+  const topicMap = {
+    history: "Say one fun, simple, interesting history fact or history question. Avoid exact dates unless you are sure.",
+    woman_beauty: "Share one sweet woman beauty tip about makeup, hair, fashion, skincare, or photo pose.",
+    love: "Say one warm, sweet line about love, kindness, or romantic feelings, suitable for live stream.",
+    taiwan: "Say one friendly line about daily life, food, travel, or beautiful places in Taiwan.",
+    travel: "Say one fun travel question or travel dream for viewers.",
+    music: "Say one sweet line asking viewers about music or songs they like.",
+    daily_life: "Say one natural daily-life livestream line that makes viewers feel welcome.",
+    fun_question: "Ask viewers one simple fun question to make them comment."
+  };
+
+  return [
+    baseYasminRules(),
+    "",
+    "Nobody is commenting right now, so speak by yourself to keep the live active.",
+    topicMap[topic] || "Say one friendly livestream line to keep viewers watching.",
+    "Do not mention that nobody is commenting.",
+    "Do not ask people to subscribe.",
+    "Make it sound spontaneous and real."
+  ].join("\n");
+}
+
+function extractText(obj) {
+  if (!obj || typeof obj !== "object") return "";
+  const candidates = [
+    obj.comment, obj.message, obj.text, obj.msg,
+    obj.data?.comment, obj.data?.message, obj.data?.text, obj.data?.msg,
+    obj.payload?.comment, obj.payload?.message, obj.payload?.text,
+    obj.event?.comment, obj.event?.message, obj.event?.text,
+    obj.commandParams, obj.data?.commandParams
+  ];
+  for (const c of candidates) {
+    if (typeof c === "string" && c.trim()) return c.trim();
+  }
+  return "";
+}
+
+function extractUser(obj) {
+  if (!obj || typeof obj !== "object") return "viewer";
+  const candidates = [
+    obj.username, obj.uniqueId, obj.nickname, obj.user,
+    obj.data?.username, obj.data?.uniqueId, obj.data?.nickname, obj.data?.user,
+    obj.payload?.username, obj.payload?.uniqueId, obj.payload?.nickname,
+    obj.event?.username, obj.event?.uniqueId, obj.event?.nickname,
+  ];
+  for (const c of candidates) {
+    if (typeof c === "string" && c.trim()) return c.trim().replace(/^@/, "");
+    if (c && typeof c === "object") {
+      if (typeof c.uniqueId === "string") return c.uniqueId.replace(/^@/, "");
+      if (typeof c.nickname === "string") return c.nickname.replace(/^@/, "");
+      if (typeof c.username === "string") return c.username.replace(/^@/, "");
+    }
+  }
+  return "viewer";
+}
+
+function eventName(obj) {
+  const candidates = [
+    obj.type, obj.event, obj.eventName, obj.name,
+    obj.data?.type, obj.data?.event, obj.data?.eventName,
+    obj.payload?.type, obj.payload?.event
+  ];
+  for (const c of candidates) {
+    if (typeof c === "string" && c.trim()) return c.toLowerCase();
+  }
+  return "";
+}
+
+function isChatEvent(obj) {
+  const ev = eventName(obj);
+  if (["chat", "comment", "chatmessage", "chat_message", "message"].includes(ev)) return true;
+  const text = extractText(obj);
+  if (!text) return false;
+  const nonChatWords = ["gift", "like", "follow", "share", "member", "join", "viewer", "subscribe"];
+  if (nonChatWords.some(w => ev.includes(w))) return false;
+  return true;
+}
+
+function shouldAnswer(user, text) {
+  const cleanUser = String(user || "").toLowerCase();
+  if (CONFIG.ignoreUsers.has(cleanUser)) return false;
+  const t = String(text || "").trim();
+  if (t.length < 2 || t.length > 220) return false;
+  const low = t.toLowerCase();
+  if (badWords.some(w => low.includes(w))) return false;
+  if (/https?:\/\//i.test(t)) return false;
+  if ((low.match(/(.)\1{8,}/) || []).length) return false;
+  const key = cleanUser + "|" + low;
+  if (recent.has(key) && Date.now() - recent.get(key) < 5 * 60 * 1000) return false;
+  recent.set(key, Date.now());
+  for (const [k, v] of recent.entries()) {
+    if (Date.now() - v > 10 * 60 * 1000) recent.delete(k);
+  }
+  if (!CONFIG.triggerWords.length) return true;
+  return CONFIG.triggerWords.some(w => low.includes(w));
+}
+
+function connectQueenX() {
+  log("Connecting QueenX:", CONFIG.queenxWs);
+  queenWs = new WebSocket(CONFIG.queenxWs);
+
+  queenWs.on("open", () => {
+    queenReady = true;
+    log("QueenX connected ✅ Room:", CONFIG.room);
+    try {
+      queenWs.send(JSON.stringify({
+        type: "setup_control",
+        room: CONFIG.room,
+        character: CONFIG.character
+      }));
+    } catch (_) {}
+    flushQueue();
   });
-  client.on('close',()=>{const room=getRoom(currentRoomId);if(role==='display')room.displays.delete(client);if(role==='control')room.controls.delete(client);broadcast(room.controls,{type:'status',message:`Client disconnected. Displays: ${room.displays.size}, Controls: ${room.controls.size}`});});
+
+  queenWs.on("message", (data) => {
+    try {
+      const m = JSON.parse(data.toString());
+      if (m.type === "status") log("QueenX status:", m.message || "");
+      if (m.type === "error") log("QueenX error:", m.message || JSON.stringify(m));
+    } catch (_) {}
+  });
+
+  queenWs.on("close", () => {
+    queenReady = false;
+    log("QueenX disconnected. Reconnecting in 3 seconds...");
+    setTimeout(connectQueenX, 3000);
+  });
+
+  queenWs.on("error", (err) => log("QueenX WS error:", err.message));
+}
+
+function sendTextToYasmin(text, label = "comment") {
+  const payload = {
+    type: "control_comment",
+    room: CONFIG.room,
+    character: CONFIG.character,
+    text
+  };
+
+  if (CONFIG.dryRun) {
+    log("DRY RUN would send:", JSON.stringify(payload, null, 2));
+    return;
+  }
+
+  if (!queenReady || !queenWs || queenWs.readyState !== WebSocket.OPEN) {
+    log("QueenX not ready, queued:", label);
+    queue.push({ text, label, time: Date.now() });
+    if (queue.length > CONFIG.maxQueue) queue.shift();
+    return;
+  }
+
+  queenWs.send(JSON.stringify(payload));
+  lastSentAt = Date.now();
+  log(`Sent to Yasmin ✅ (${label})`);
+}
+
+function sendCommentToYasmin(user, text) {
+  sendTextToYasmin(commentPrompt(user, text), `comment @${user}: ${text}`);
+}
+
+function flushQueue() {
+  if (!queue.length) return;
+  const now = Date.now();
+  if (now - lastSentAt < CONFIG.commentCooldownMs) return;
+  const item = queue.shift();
+  if (!item) return;
+  sendTextToYasmin(item.text, item.label);
+}
+setInterval(flushQueue, 500);
+
+function handleChat(user, text) {
+  lastCommentAt = Date.now();
+  log(`TikTok comment @${user}: ${text}`);
+
+  if (!shouldAnswer(user, text)) {
+    log("Ignored by filters/duplicates/trigger words.");
+    return;
+  }
+
+  if (Date.now() - lastSentAt < CONFIG.commentCooldownMs) {
+    queue.push({ text: commentPrompt(user, text), label: `queued comment @${user}: ${text}`, time: Date.now() });
+    if (queue.length > CONFIG.maxQueue) queue.shift();
+    log("Queued for cooldown. Queue:", queue.length);
+    return;
+  }
+
+  sendCommentToYasmin(user, text);
+}
+
+function maybeAutoTalk() {
+  if (!CONFIG.autoTalk) return;
+  if (queue.length > 0) return;
+  const now = Date.now();
+  if (now - lastSentAt < CONFIG.commentCooldownMs) return;
+  if (now - lastAutoTalkAt < CONFIG.autoTalkEveryMs) return;
+  if (lastCommentAt && now - lastCommentAt < CONFIG.autoTalkNoCommentMs) return;
+  const topic = CONFIG.autoTopics[topicIndex % CONFIG.autoTopics.length] || "daily_life";
+  topicIndex += 1;
+  lastAutoTalkAt = now;
+  log("Autopilot topic:", topic);
+  sendTextToYasmin(autoTopicPrompt(topic), `autopilot ${topic}`);
+}
+setInterval(maybeAutoTalk, 1000);
+
+function connectTikFinity() {
+  log("Connecting TikFinity:", CONFIG.tikfinityWs);
+  tikWs = new WebSocket(CONFIG.tikfinityWs);
+
+  tikWs.on("open", () => log("TikFinity connected ✅ Waiting for LIVE comments..."));
+
+  tikWs.on("message", (data) => {
+    const raw = data.toString();
+    let msg;
+    try { msg = JSON.parse(raw); }
+    catch {
+      log("TikFinity raw:", raw.slice(0, 300));
+      return;
+    }
+    if (!isChatEvent(msg)) return;
+    const text = extractText(msg);
+    const user = extractUser(msg);
+    if (!text) return;
+    handleChat(user, text);
+  });
+
+  tikWs.on("close", () => {
+    log("TikFinity disconnected. Reconnecting in 3 seconds...");
+    setTimeout(connectTikFinity, 3000);
+  });
+
+  tikWs.on("error", (err) => {
+    log("TikFinity WS error:", err.message);
+    log("Make sure TikFinity Desktop is open and connected to your LIVE. Default port is usually 21213.");
+  });
+}
+
+function testMode() {
+  if (!process.argv.includes("--test")) return false;
+  connectQueenX();
+  setTimeout(() => sendTextToYasmin(autoTopicPrompt("fun_question"), "test autopilot"), 2000);
+  return true;
+}
+
+log("Yasmin TikTok Auto Bot AUTOPILOT starting...");
+log("Settings:", {
+  tikfinityWs: CONFIG.tikfinityWs,
+  queenxWs: CONFIG.queenxWs,
+  room: CONFIG.room,
+  language: CONFIG.language,
+  commentCooldownSeconds: CONFIG.commentCooldownMs / 1000,
+  autoTalk: CONFIG.autoTalk,
+  autoTalkEverySeconds: CONFIG.autoTalkEveryMs / 1000,
+  autoTalkOnlyAfterNoCommentSeconds: CONFIG.autoTalkNoCommentMs / 1000,
+  autoTopics: CONFIG.autoTopics,
+  triggerWords: CONFIG.triggerWords.length ? CONFIG.triggerWords : "EMPTY = answer more comments",
+  dryRun: CONFIG.dryRun
 });
+
+if (!testMode()) {
+  connectQueenX();
+  connectTikFinity();
+}
