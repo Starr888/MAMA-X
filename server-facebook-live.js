@@ -1,11 +1,26 @@
 /*
-  Yasmin TikTok Auto Bot - Autopilot Mode
-  TikFinity LIVE comments -> QueenX Render WebSocket -> Yasmin speaks.
-  Also makes Yasmin talk by herself when comments are quiet.
+  Yasmin TikTok Auto Bot - Render + Local Fixed Version
+  File name for GitHub/Render: server-facebook-live.js
+
+  FIXES:
+  - Adds an HTTP health server so Render Web Service does NOT fail because no PORT is open.
+  - Keeps QueenX WebSocket connection alive.
+  - Can run AutoTalk by itself.
+  - Can connect to TikFinity comments when running on your Windows PC.
+  - On Render, TikFinity is disabled by default because Render cannot reach ws://127.0.0.1:21213 on your PC.
 */
 
 const fs = require("fs");
+const http = require("http");
 const WebSocket = require("ws");
+
+process.on("uncaughtException", (err) => {
+  console.error("UNCAUGHT EXCEPTION:", err && err.stack ? err.stack : err);
+});
+
+process.on("unhandledRejection", (err) => {
+  console.error("UNHANDLED REJECTION:", err && err.stack ? err.stack : err);
+});
 
 function loadEnvFile() {
   if (!fs.existsSync(".env")) return;
@@ -19,24 +34,47 @@ function loadEnvFile() {
 }
 loadEnvFile();
 
+function boolEnv(name, fallback) {
+  const value = process.env[name];
+  if (value === undefined || value === null || value === "") return fallback;
+  return String(value).toLowerCase() === "true";
+}
+
+const IS_RENDER = String(process.env.RENDER || "").toLowerCase() === "true" ||
+  Boolean(process.env.RENDER_SERVICE_ID);
+
 const CONFIG = {
+  port: Number(process.env.PORT || 10000),
+
   tikfinityWs: process.env.TIKFINITY_WS || "ws://127.0.0.1:21213/",
   queenxWs: process.env.QUEENX_WS || "wss://queenx-live.onrender.com",
+
   room: process.env.ROOM || "queenx",
   character: process.env.CHARACTER || "yasmin",
   language: (process.env.LANGUAGE || "no_khmer_multilang").toLowerCase(),
+
   commentCooldownMs: Math.max(3, Number(process.env.COMMENT_COOLDOWN_SECONDS || 8)) * 1000,
-  autoTalk: String(process.env.AUTO_TALK || "true").toLowerCase() === "true",
+  autoTalk: boolEnv("AUTO_TALK", true),
   autoTalkEveryMs: Math.max(15, Number(process.env.AUTO_TALK_EVERY_SECONDS || 45)) * 1000,
   autoTalkNoCommentMs: Math.max(5, Number(process.env.AUTO_TALK_ONLY_AFTER_NO_COMMENT_SECONDS || 20)) * 1000,
+
   autoTopics: (process.env.AUTO_TOPICS || "history,woman_beauty,love,taiwan,travel,music,daily_life,fun_question")
     .split(",").map(s => s.trim()).filter(Boolean),
+
   triggerWords: (process.env.TRIGGER_WORDS || "")
     .split(",").map(s => s.trim().toLowerCase()).filter(Boolean),
+
   ignoreUsers: new Set((process.env.IGNORE_USERS || "")
     .split(",").map(s => s.trim().toLowerCase()).filter(Boolean)),
-  dryRun: String(process.env.DRY_RUN || "false").toLowerCase() === "true",
+
+  dryRun: boolEnv("DRY_RUN", false),
   maxQueue: Math.max(20, Number(process.env.MAX_QUEUE || 80)),
+
+  // Important:
+  // Render cannot connect to TikFinity Desktop on your PC at 127.0.0.1.
+  // So on Render this defaults to false.
+  // On your Windows PC this defaults to true.
+  runTikfinity: boolEnv("RUN_TIKFINITY", !IS_RENDER),
 };
 
 let queenWs = null;
@@ -58,13 +96,72 @@ function log(...args) {
   console.log(new Date().toLocaleTimeString(), "-", ...args);
 }
 
+function jsonResponse(res, statusCode, data) {
+  res.statusCode = statusCode;
+  res.setHeader("Content-Type", "application/json; charset=utf-8");
+  res.end(JSON.stringify(data, null, 2));
+}
+
+function startHealthServer() {
+  const server = http.createServer((req, res) => {
+    const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
+
+    if (url.pathname === "/" || url.pathname === "/health" || url.pathname === "/status") {
+      return jsonResponse(res, 200, {
+        ok: true,
+        service: "yasmin-autopilot",
+        file: "server-facebook-live.js",
+        renderDetected: IS_RENDER,
+        character: CONFIG.character,
+        room: CONFIG.room,
+        queenxConnected: queenReady,
+        queueLength: queue.length,
+        autoTalk: CONFIG.autoTalk,
+        runTikfinity: CONFIG.runTikfinity,
+        uptimeSeconds: Math.round(process.uptime())
+      });
+    }
+
+    // Manual test endpoint:
+    // /say?text=Hello%20everyone
+    if (url.pathname === "/say") {
+      const text = (url.searchParams.get("text") || "").trim();
+      if (!text) return jsonResponse(res, 400, { ok: false, error: "Missing text. Use /say?text=Hello" });
+      sendTextToYasmin(
+        baseYasminRules() + "\n\nSay this naturally now: " + text,
+        "manual /say"
+      );
+      return jsonResponse(res, 200, { ok: true, queuedOrSent: true, text });
+    }
+
+    jsonResponse(res, 404, { ok: false, error: "Not found", use: ["/", "/health", "/status", "/say?text=Hello"] });
+  });
+
+  server.listen(CONFIG.port, "0.0.0.0", () => {
+    log(`HTTP health server listening on 0.0.0.0:${CONFIG.port} ✅`);
+  });
+
+  server.on("error", (err) => {
+    console.error("HTTP health server error:", err && err.stack ? err.stack : err);
+  });
+}
+
+function validWsUrl(url) {
+  try {
+    const u = new URL(url);
+    return u.protocol === "ws:" || u.protocol === "wss:";
+  } catch (_) {
+    return false;
+  }
+}
+
 function languageInstruction() {
   return [
     "Do NOT speak Khmer.",
     "Use only English, Thai, Indonesian, Spanish, Arabic, or Chinese.",
     "Match the viewer's language if it is one of those languages.",
     "If the viewer writes Khmer or an unsupported language, reply in simple English.",
-    "If the viewer asks where you are from, say: I'm Arab, currently living in Taiwan."
+    "If the viewer asks where you are from, say: I'm Arab-style Yasmin, live from Taiwan tonight."
   ].join(" ");
 }
 
@@ -75,7 +172,9 @@ function baseYasminRules() {
     "You are sweet, friendly, playful, feminine, fun, and natural.",
     "Talk like a real livestream host, not like an advertisement.",
     "Keep everything safe and suitable for TikTok LIVE.",
-    "Do not say you are AI, bot, virtual, model, server, or assistant.",
+    "Never introduce yourself as AI, bot, virtual, model, server, or assistant.",
+    "If someone asks if you are real, say you are really here live as Yasmin talking with them tonight.",
+    "If someone directly asks if you are AI or a bot, answer honestly but warmly: I'm Yasmin, your live digital host, here talking with you now.",
     "Do not promote subscription, Queen X, VIP, or private videos unless the viewer directly asks.",
     "Use one short sentence only, 6 to 18 words maximum."
   ].join("\n");
@@ -105,7 +204,7 @@ function autoTopicPrompt(topic) {
   return [
     baseYasminRules(),
     "",
-    "Nobody is commenting right now, so speak by yourself to keep the live active.",
+    "Speak by yourself to keep the live active.",
     topicMap[topic] || "Say one friendly livestream line to keep viewers watching.",
     "Do not mention that nobody is commenting.",
     "Do not ask people to subscribe.",
@@ -172,23 +271,33 @@ function isChatEvent(obj) {
 function shouldAnswer(user, text) {
   const cleanUser = String(user || "").toLowerCase();
   if (CONFIG.ignoreUsers.has(cleanUser)) return false;
+
   const t = String(text || "").trim();
   if (t.length < 2 || t.length > 220) return false;
+
   const low = t.toLowerCase();
   if (badWords.some(w => low.includes(w))) return false;
   if (/https?:\/\//i.test(t)) return false;
   if ((low.match(/(.)\1{8,}/) || []).length) return false;
+
   const key = cleanUser + "|" + low;
   if (recent.has(key) && Date.now() - recent.get(key) < 5 * 60 * 1000) return false;
   recent.set(key, Date.now());
+
   for (const [k, v] of recent.entries()) {
     if (Date.now() - v > 10 * 60 * 1000) recent.delete(k);
   }
+
   if (!CONFIG.triggerWords.length) return true;
   return CONFIG.triggerWords.some(w => low.includes(w));
 }
 
 function connectQueenX() {
+  if (!validWsUrl(CONFIG.queenxWs)) {
+    log("QUEENX_WS is not a valid ws/wss URL:", CONFIG.queenxWs);
+    return;
+  }
+
   log("Connecting QueenX:", CONFIG.queenxWs);
   queenWs = new WebSocket(CONFIG.queenxWs);
 
@@ -201,7 +310,9 @@ function connectQueenX() {
         room: CONFIG.room,
         character: CONFIG.character
       }));
-    } catch (_) {}
+    } catch (err) {
+      log("QueenX setup send error:", err.message);
+    }
     flushQueue();
   });
 
@@ -253,8 +364,10 @@ function sendCommentToYasmin(user, text) {
 
 function flushQueue() {
   if (!queue.length) return;
+
   const now = Date.now();
   if (now - lastSentAt < CONFIG.commentCooldownMs) return;
+
   const item = queue.shift();
   if (!item) return;
   sendTextToYasmin(item.text, item.label);
@@ -283,10 +396,12 @@ function handleChat(user, text) {
 function maybeAutoTalk() {
   if (!CONFIG.autoTalk) return;
   if (queue.length > 0) return;
+
   const now = Date.now();
   if (now - lastSentAt < CONFIG.commentCooldownMs) return;
   if (now - lastAutoTalkAt < CONFIG.autoTalkEveryMs) return;
   if (lastCommentAt && now - lastCommentAt < CONFIG.autoTalkNoCommentMs) return;
+
   const topic = CONFIG.autoTopics[topicIndex % CONFIG.autoTopics.length] || "daily_life";
   topicIndex += 1;
   lastAutoTalkAt = now;
@@ -296,6 +411,17 @@ function maybeAutoTalk() {
 setInterval(maybeAutoTalk, 1000);
 
 function connectTikFinity() {
+  if (!CONFIG.runTikfinity) {
+    log("TikFinity disabled on this machine. This is normal on Render.");
+    log("Run START_YASMIN_AUTOPILOT_BOT.bat on your Windows PC for TikFinity comments.");
+    return;
+  }
+
+  if (!validWsUrl(CONFIG.tikfinityWs)) {
+    log("TIKFINITY_WS is not a valid ws/wss URL:", CONFIG.tikfinityWs);
+    return;
+  }
+
   log("Connecting TikFinity:", CONFIG.tikfinityWs);
   tikWs = new WebSocket(CONFIG.tikfinityWs);
 
@@ -309,7 +435,9 @@ function connectTikFinity() {
       log("TikFinity raw:", raw.slice(0, 300));
       return;
     }
+
     if (!isChatEvent(msg)) return;
+
     const text = extractText(msg);
     const user = extractUser(msg);
     if (!text) return;
@@ -334,8 +462,12 @@ function testMode() {
   return true;
 }
 
+startHealthServer();
+
 log("Yasmin TikTok Auto Bot AUTOPILOT starting...");
 log("Settings:", {
+  port: CONFIG.port,
+  isRender: IS_RENDER,
   tikfinityWs: CONFIG.tikfinityWs,
   queenxWs: CONFIG.queenxWs,
   room: CONFIG.room,
@@ -346,6 +478,7 @@ log("Settings:", {
   autoTalkOnlyAfterNoCommentSeconds: CONFIG.autoTalkNoCommentMs / 1000,
   autoTopics: CONFIG.autoTopics,
   triggerWords: CONFIG.triggerWords.length ? CONFIG.triggerWords : "EMPTY = answer more comments",
+  runTikfinity: CONFIG.runTikfinity,
   dryRun: CONFIG.dryRun
 });
 
