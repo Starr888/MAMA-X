@@ -1,307 +1,294 @@
-/*
-  Yasmin TikTok Auto Bot - More Reply Mode
-  TikFinity LIVE comments -> QueenX Render WebSocket -> Yasmin speaks on live page.
-*/
 
-const fs = require("fs");
-const WebSocket = require("ws");
+import 'dotenv/config';
+import express from 'express';
+import { WebSocketServer } from 'ws';
+import { GoogleGenAI, Modality } from '@google/genai';
 
-function loadEnvFile() {
-  const p = ".env";
-  if (!fs.existsSync(p)) return;
-  const raw = fs.readFileSync(p, "utf8");
-  for (const line of raw.split(/\r?\n/)) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith("#") || !trimmed.includes("=")) continue;
-    const [key, ...rest] = trimmed.split("=");
-    if (!process.env[key]) process.env[key] = rest.join("=").trim();
-  }
-}
-loadEnvFile();
+const PORT = Number(process.env.PORT || 8080);
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+const GEMINI_LIVE_MODEL =
+  process.env.GEMINI_LIVE_MODEL ||
+  process.env.GEMINI_MODEL ||
+  'gemini-2.5-flash-native-audio-preview-12-2025';
+const GEMINI_VOICE_NAME = process.env.GEMINI_VOICE_NAME || 'Kore';
 
-const CONFIG = {
-  tikfinityWs: process.env.TIKFINITY_WS || "ws://127.0.0.1:21213/",
-  queenxWs: process.env.QUEENX_WS || "wss://queenx-live.onrender.com",
-  room: process.env.ROOM || "queenx",
-  character: process.env.CHARACTER || "yasmin",
-  language: (process.env.LANGUAGE || "no_khmer_multilang").toLowerCase(),
-  cooldownMs: Math.max(3, Number(process.env.COOLDOWN_SECONDS || 8)) * 1000,
-  triggerWords: (process.env.TRIGGER_WORDS || "")
-    .split(",").map(s => s.trim().toLowerCase()).filter(Boolean),
-  ignoreUsers: new Set((process.env.IGNORE_USERS || "")
-    .split(",").map(s => s.trim().toLowerCase()).filter(Boolean)),
-  dryRun: String(process.env.DRY_RUN || "false").toLowerCase() === "true",
-  maxQueue: Math.max(20, Number(process.env.MAX_QUEUE || 60)),
-};
-
-let queenWs = null;
-let tikWs = null;
-let queenReady = false;
-let lastSentAt = 0;
-let queue = [];
-let recent = new Map();
-
-const badWords = [
-  "kill yourself", "suicide", "terrorist", "bomb", "drug", "nude", "porn",
-  "sex", "onlyfans", "hack", "scam", "password", "api key"
-];
-
-function log(...args) {
-  console.log(new Date().toLocaleTimeString(), "-", ...args);
+if (!GEMINI_API_KEY) {
+  console.error('Missing GEMINI_API_KEY');
+  process.exit(1);
 }
 
-function languageInstruction() {
-  if (CONFIG.language === "english") {
-    return "Reply in English naturally. Do not speak Khmer.";
-  }
+const app = express();
+app.use(express.json({ limit: '1mb' }));
 
-  return [
-    "Do NOT speak Khmer.",
-    "Use only English, Thai, Indonesian, Spanish, Arabic, or Chinese.",
-    "Match the viewer's language if it is one of those languages.",
-    "If the viewer writes Khmer or an unsupported language, reply in simple English.",
-    "If the viewer asks where you are from, say: I'm Arab, currently living in Taiwan."
-  ].join(" ");
-}
-
-function yasminPrompt(user, comment) {
-  return [
-    languageInstruction(),
-    "",
-    "You are Yasmin from MAMA X TikTok LIVE.",
-    "Answer viewer comments like a real livestream host.",
-    "Keep the answer short: one sentence only, 6 to 16 words maximum.",
-    "Be sweet, friendly, playful, natural, and fun.",
-    "Make viewers feel noticed so they keep watching.",
-    "Do not say you are AI, bot, virtual, model, server, or assistant.",
-    "Do not promote subscription, VIP, Queen X, or private videos unless the viewer directly asks.",
-    "Do not answer unsafe, hateful, illegal, or explicit requests.",
-    "",
-    `Viewer @${user} commented: ${comment}`,
-    "",
-    "Yasmin, reply to this viewer now."
-  ].join("\n");
-}
-
-function extractText(obj) {
-  if (!obj || typeof obj !== "object") return "";
-  const candidates = [
-    obj.comment, obj.message, obj.text, obj.msg,
-    obj.data?.comment, obj.data?.message, obj.data?.text, obj.data?.msg,
-    obj.payload?.comment, obj.payload?.message, obj.payload?.text,
-    obj.event?.comment, obj.event?.message, obj.event?.text,
-    obj.commandParams, obj.data?.commandParams
-  ];
-  for (const c of candidates) {
-    if (typeof c === "string" && c.trim()) return c.trim();
-  }
-  return "";
-}
-
-function extractUser(obj) {
-  if (!obj || typeof obj !== "object") return "viewer";
-  const candidates = [
-    obj.username, obj.uniqueId, obj.nickname, obj.user,
-    obj.data?.username, obj.data?.uniqueId, obj.data?.nickname, obj.data?.user,
-    obj.payload?.username, obj.payload?.uniqueId, obj.payload?.nickname,
-    obj.event?.username, obj.event?.uniqueId, obj.event?.nickname,
-  ];
-  for (const c of candidates) {
-    if (typeof c === "string" && c.trim()) return c.trim().replace(/^@/, "");
-    if (c && typeof c === "object") {
-      if (typeof c.uniqueId === "string") return c.uniqueId.replace(/^@/, "");
-      if (typeof c.nickname === "string") return c.nickname.replace(/^@/, "");
-      if (typeof c.username === "string") return c.username.replace(/^@/, "");
-    }
-  }
-  return "viewer";
-}
-
-function eventName(obj) {
-  const candidates = [
-    obj.type, obj.event, obj.eventName, obj.name,
-    obj.data?.type, obj.data?.event, obj.data?.eventName,
-    obj.payload?.type, obj.payload?.event
-  ];
-  for (const c of candidates) {
-    if (typeof c === "string" && c.trim()) return c.toLowerCase();
-  }
-  return "";
-}
-
-function isChatEvent(obj) {
-  const ev = eventName(obj);
-  if (["chat", "comment", "chatmessage", "chat_message", "message"].includes(ev)) return true;
-  const text = extractText(obj);
-  if (!text) return false;
-  const nonChatWords = ["gift", "like", "follow", "share", "member", "join", "viewer", "subscribe"];
-  if (nonChatWords.some(w => ev.includes(w))) return false;
-  return true;
-}
-
-function shouldAnswer(user, text) {
-  const cleanUser = String(user || "").toLowerCase();
-  if (CONFIG.ignoreUsers.has(cleanUser)) return false;
-
-  const t = String(text || "").trim();
-  if (t.length < 2 || t.length > 220) return false;
-
-  const low = t.toLowerCase();
-  if (badWords.some(w => low.includes(w))) return false;
-  if (/https?:\/\//i.test(t)) return false;
-  if ((low.match(/(.)\1{8,}/) || []).length) return false;
-
-  const key = cleanUser + "|" + low;
-  if (recent.has(key) && Date.now() - recent.get(key) < 5 * 60 * 1000) return false;
-  recent.set(key, Date.now());
-
-  for (const [k, v] of recent.entries()) {
-    if (Date.now() - v > 10 * 60 * 1000) recent.delete(k);
-  }
-
-  // More Reply Mode: if TRIGGER_WORDS is empty, answer almost all normal chat comments.
-  if (!CONFIG.triggerWords.length) return true;
-
-  return CONFIG.triggerWords.some(w => low.includes(w));
-}
-
-function connectQueenX() {
-  log("Connecting QueenX:", CONFIG.queenxWs);
-  queenWs = new WebSocket(CONFIG.queenxWs);
-
-  queenWs.on("open", () => {
-    queenReady = true;
-    log("QueenX connected ✅ Room:", CONFIG.room);
-    try {
-      queenWs.send(JSON.stringify({
-        type: "setup_control",
-        room: CONFIG.room,
-        character: CONFIG.character
-      }));
-    } catch (_) {}
-    flushQueue();
-  });
-
-  queenWs.on("message", (data) => {
-    try {
-      const m = JSON.parse(data.toString());
-      if (m.type === "status") log("QueenX status:", m.message || "");
-      if (m.type === "error") log("QueenX error:", m.message || JSON.stringify(m));
-    } catch (_) {}
-  });
-
-  queenWs.on("close", () => {
-    queenReady = false;
-    log("QueenX disconnected. Reconnecting in 3 seconds...");
-    setTimeout(connectQueenX, 3000);
-  });
-
-  queenWs.on("error", (err) => log("QueenX WS error:", err.message));
-}
-
-function sendToYasmin(user, text) {
-  const payload = {
-    type: "control_comment",
-    room: CONFIG.room,
-    character: CONFIG.character,
-    text: yasminPrompt(user, text)
-  };
-
-  if (CONFIG.dryRun) {
-    log("DRY RUN would send:", JSON.stringify(payload, null, 2));
-    return;
-  }
-
-  if (!queenReady || !queenWs || queenWs.readyState !== WebSocket.OPEN) {
-    log("QueenX not ready, queued comment:", user, text);
-    queue.push({ user, text, time: Date.now() });
-    if (queue.length > CONFIG.maxQueue) queue.shift();
-    return;
-  }
-
-  queenWs.send(JSON.stringify(payload));
-  lastSentAt = Date.now();
-  log(`Sent to Yasmin ✅ @${user}: ${text}`);
-}
-
-function flushQueue() {
-  if (!queue.length) return;
-  const now = Date.now();
-  if (now - lastSentAt < CONFIG.cooldownMs) return;
-  const item = queue.shift();
-  if (!item) return;
-  sendToYasmin(item.user, item.text);
-}
-setInterval(flushQueue, 500);
-
-function handleChat(user, text) {
-  log(`TikTok comment @${user}: ${text}`);
-  if (!shouldAnswer(user, text)) {
-    log("Ignored by filters/duplicates/trigger words.");
-    return;
-  }
-  if (Date.now() - lastSentAt < CONFIG.cooldownMs) {
-    queue.push({ user, text, time: Date.now() });
-    if (queue.length > CONFIG.maxQueue) queue.shift();
-    log("Queued for cooldown. Queue:", queue.length);
-    return;
-  }
-  sendToYasmin(user, text);
-}
-
-function connectTikFinity() {
-  log("Connecting TikFinity:", CONFIG.tikfinityWs);
-  tikWs = new WebSocket(CONFIG.tikfinityWs);
-
-  tikWs.on("open", () => log("TikFinity connected ✅ Waiting for LIVE comments..."));
-
-  tikWs.on("message", (data) => {
-    const raw = data.toString();
-    let msg;
-    try { msg = JSON.parse(raw); }
-    catch {
-      log("TikFinity raw:", raw.slice(0, 300));
-      return;
-    }
-    if (!isChatEvent(msg)) return;
-    const text = extractText(msg);
-    const user = extractUser(msg);
-    if (!text) return;
-    handleChat(user, text);
-  });
-
-  tikWs.on("close", () => {
-    log("TikFinity disconnected. Reconnecting in 3 seconds...");
-    setTimeout(connectTikFinity, 3000);
-  });
-
-  tikWs.on("error", (err) => {
-    log("TikFinity WS error:", err.message);
-    log("Make sure TikFinity Desktop is open and connected to your LIVE. Default port is usually 21213.");
-  });
-}
-
-function testMode() {
-  const idx = process.argv.indexOf("--test");
-  if (idx === -1) return false;
-  const testText = process.argv.slice(idx + 1).join(" ") || "Hello Yasmin";
-  connectQueenX();
-  setTimeout(() => sendToYasmin("test_viewer", testText), 2000);
-  return true;
-}
-
-log("Yasmin TikTok Auto Bot MORE REPLY starting...");
-log("Settings:", {
-  tikfinityWs: CONFIG.tikfinityWs,
-  queenxWs: CONFIG.queenxWs,
-  room: CONFIG.room,
-  language: CONFIG.language,
-  cooldownSeconds: CONFIG.cooldownMs / 1000,
-  triggerWords: CONFIG.triggerWords.length ? CONFIG.triggerWords : "EMPTY = answer more comments",
-  dryRun: CONFIG.dryRun
+app.get('/', (_req, res) => {
+  res.type('text/plain').send(
+    `Queen X Facebook Live Control Server is running\n` +
+    `Model: ${GEMINI_LIVE_MODEL}\n` +
+    `Voice: ${GEMINI_VOICE_NAME}\n` +
+    `Mode: clean display + private control\n` +
+    `Render-safe web service: yes\n`
+  );
 });
 
-if (!testMode()) {
-  connectQueenX();
-  connectTikFinity();
+app.get('/health', (_req, res) => {
+  res.json({
+    ok: true,
+    mode: 'clean display + private control',
+    model: GEMINI_LIVE_MODEL,
+    voice: GEMINI_VOICE_NAME,
+    hasGeminiKey: Boolean(GEMINI_API_KEY),
+    rooms: Array.from(rooms.keys()).map((room) => ({
+      room,
+      displays: rooms.get(room).displays.size,
+      controls: rooms.get(room).controls.size,
+    })),
+  });
+});
+
+const server = app.listen(PORT, () => {
+  console.log(`Queen X Facebook Live Control Server listening on ${PORT}`);
+});
+
+const wss = new WebSocketServer({ server });
+const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
+
+const rooms = new Map();
+
+function getRoom(roomId = 'queenx') {
+  if (!rooms.has(roomId)) {
+    rooms.set(roomId, {
+      id: roomId,
+      displays: new Set(),
+      controls: new Set(),
+      geminiSession: null,
+      ready: false,
+      pending: [],
+    });
+  }
+  return rooms.get(roomId);
 }
+
+function safeSend(client, payload) {
+  try {
+    if (client.readyState === 1) client.send(JSON.stringify(payload));
+  } catch {}
+}
+
+function broadcast(clients, payload) {
+  for (const client of clients) safeSend(client, payload);
+}
+
+function cleanText(value, maxLength = 3000) {
+  if (typeof value !== 'string') return '';
+  return value.trim().slice(0, maxLength);
+}
+
+function buildYasminLiveInstruction() {
+  return `
+You are Yasmin from Queen X on a Facebook live stream.
+You speak like a real warm woman live on camera.
+Answer only the selected viewer comment.
+Reply in one short sentence only, 6 to 14 words maximum.
+No long explanation. No paragraphs. No lists.
+Be sweet, emotional, natural, and friendly.
+Promote Queen X subscription warmly when it fits.
+Do not say you are AI, bot, model, server, or assistant.
+Ignore spam and random comments.
+Keep everything safe, respectful, and suitable for Facebook Live.
+`.trim();
+}
+
+async function startGemini(room) {
+  if (room.geminiSession) return room.geminiSession;
+
+  room.ready = false;
+  broadcast(room.controls, { type: 'status', message: 'Connecting Yasmin voice...' });
+
+  const liveConfig = {
+    responseModalities: [Modality.AUDIO],
+    systemInstruction: { parts: [{ text: buildYasminLiveInstruction() }] },
+    outputAudioTranscription: {},
+    speechConfig: {
+      voiceConfig: {
+        prebuiltVoiceConfig: { voiceName: GEMINI_VOICE_NAME },
+      },
+    },
+  };
+
+  room.geminiSession = await ai.live.connect({
+    model: GEMINI_LIVE_MODEL,
+    callbacks: {
+      onopen: () => {
+        room.ready = true;
+        broadcast(room.controls, { type: 'status', message: 'Yasmin voice connected.' });
+        const pending = room.pending.splice(0);
+        for (const input of pending) {
+          try { room.geminiSession.sendRealtimeInput(input); } catch {}
+        }
+      },
+      onmessage: (message) => {
+        const content = message.serverContent;
+
+        if (content?.outputTranscription?.text) {
+          broadcast(room.controls, { type: 'text', text: content.outputTranscription.text });
+        }
+
+        if (content?.modelTurn?.parts) {
+          for (const part of content.modelTurn.parts) {
+            if (part.inlineData?.data) {
+              broadcast(room.displays, {
+                type: 'audio',
+                data: part.inlineData.data,
+                mimeType: part.inlineData.mimeType || 'audio/pcm;rate=24000',
+              });
+            }
+            if (part.text) {
+              broadcast(room.controls, { type: 'text', text: part.text });
+            }
+          }
+        }
+
+        if (content?.turnComplete) {
+          broadcast(room.displays, { type: 'turn_complete' });
+          broadcast(room.controls, { type: 'status', message: 'Answer complete.' });
+        }
+      },
+      onerror: (e) => {
+        broadcast(room.controls, { type: 'error', message: e?.message || String(e) });
+      },
+      onclose: () => {
+        room.ready = false;
+        room.geminiSession = null;
+        broadcast(room.controls, { type: 'status', message: 'Gemini voice closed.' });
+      },
+    },
+    config: liveConfig,
+  });
+
+  return room.geminiSession;
+}
+
+async function sendToGemini(room, input) {
+  await startGemini(room);
+  if (room.ready && room.geminiSession) {
+    room.geminiSession.sendRealtimeInput(input);
+  } else {
+    room.pending.push(input);
+  }
+}
+
+wss.on('connection', (client) => {
+  let currentRoomId = 'queenx';
+  let role = 'unknown';
+
+  safeSend(client, { type: 'status', message: 'Connected to Queen X live server.' });
+
+  client.on('message', async (raw) => {
+    try {
+      const msg = JSON.parse(raw.toString());
+      currentRoomId = cleanText(msg.room || currentRoomId || 'queenx', 80) || 'queenx';
+      const room = getRoom(currentRoomId);
+
+      if (msg.type === 'setup_display') {
+        role = 'display';
+        room.displays.add(client);
+        safeSend(client, { type: 'status', message: `Display connected to room ${currentRoomId}.` });
+        broadcast(room.controls, { type: 'status', message: `Display connected. Displays: ${room.displays.size}` });
+        return;
+      }
+
+      if (msg.type === 'setup_control') {
+        role = 'control';
+        room.controls.add(client);
+        safeSend(client, { type: 'status', message: `Control connected to room ${currentRoomId}. Displays online: ${room.displays.size}` });
+        return;
+      }
+
+
+      if (msg.type === 'setup') {
+        role = 'display';
+        room.displays.add(client);
+        safeSend(client, { type: 'status', message: `Same-page display connected to room ${currentRoomId}.` });
+        broadcast(room.controls, { type: 'status', message: `Same-page display connected. Displays: ${room.displays.size}` });
+        return;
+      }
+
+      if (msg.type === 'text') {
+        const text = cleanText(msg.text, 2500);
+        if (!text) return;
+        broadcast(room.controls, { type: 'status', message: `Sending text to Yasmin.` });
+        await sendToGemini(room, { text });
+        return;
+      }
+
+      if (msg.type === 'control_direct') {
+        const text = cleanText(msg.text, 1500);
+        if (!text) return;
+        broadcast(room.controls, { type: 'status', message: `Direct words sent to Yasmin.` });
+        await sendToGemini(room, {
+          text:
+            `Say exactly this as Yasmin on Facebook Live. ` +
+            `Speak naturally and warmly. Do not add extra words: "${text}"`,
+        });
+        return;
+      }
+
+      if (msg.type === 'control_story') {
+        const text = cleanText(msg.text, 2000);
+        if (!text) return;
+        broadcast(room.controls, { type: 'status', message: `Story request sent to Yasmin.` });
+        await sendToGemini(room, {
+          text:
+            `Tell this as Yasmin on Facebook Live in a short, safe, warm story. ` +
+            `Keep it natural, friendly, and suitable for Facebook Live: "${text}"`,
+        });
+        return;
+      }
+
+      if (msg.type === 'control_game') {
+        const text = cleanText(msg.text, 1500);
+        if (!text) return;
+        broadcast(room.controls, { type: 'status', message: `Game announcement sent to Yasmin.` });
+        await sendToGemini(room, {
+          text:
+            `Make a short game announcement as Yasmin on Facebook Live. ` +
+            `Say it warmly and clearly: "${text}"`,
+        });
+        return;
+      }
+
+      if (msg.type === 'control_music') {
+        const text = cleanText(msg.text || msg.url, 1000);
+        broadcast(room.controls, { type: 'status', message: `Music command received: ${text}` });
+        broadcast(room.displays, { type: 'music', url: text });
+        return;
+      }
+
+      if (msg.type === 'control_comment') {
+        const text = cleanText(msg.text, 1000);
+        if (!text) return;
+
+        broadcast(room.controls, { type: 'status', message: `Sending selected comment to Yasmin: ${text}` });
+
+        await sendToGemini(room, {
+          text:
+            `Viewer comment: "${text}". ` +
+            `Reply as Yasmin on Facebook Live in ONE short sentence only, 6 to 14 words maximum. ` +
+            `Be warm and invite viewers to subscribe to Queen X when it fits.`,
+        });
+        return;
+      }
+
+      safeSend(client, { type: 'error', message: `Unknown message type: ${String(msg.type || '')}` });
+    } catch (err) {
+      safeSend(client, { type: 'error', message: err?.message || String(err) });
+    }
+  });
+
+  client.on('close', () => {
+    const room = getRoom(currentRoomId);
+    if (role === 'display') room.displays.delete(client);
+    if (role === 'control') room.controls.delete(client);
+    broadcast(room.controls, { type: 'status', message: `Client disconnected. Displays: ${room.displays.size}, Controls: ${room.controls.size}` });
+  });
+});
