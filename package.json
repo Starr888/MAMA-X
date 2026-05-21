@@ -1,11 +1,10 @@
 {
-  "name": "queenx-facebook-live-render-safe",
+  "name": "mama-x-tiktok-live-server",
   "version": "1.0.0",
   "type": "module",
   "main": "server-facebook-live.js",
   "scripts": {
-    "start": "node server-facebook-live.js",
-    "tiktok": "node yasmin-tiktok-auto-bot.cjs"
+    "start": "node server-facebook-live.js"
   },
   "dependencies": {
     "@google/genai": "^1.8.0",
