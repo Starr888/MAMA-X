@@ -1,11 +1,10 @@
 {
-  "name": "yasmin-live-server",
+  "name": "queenx-yasmin-live-server",
   "version": "1.0.0",
-  "description": "Yasmin AutoPilot live bridge for Render and local TikFinity.",
+  "description": "Render WebSocket server for Yasmin Control Center and AutoPilot.",
   "main": "server-facebook-live.js",
   "scripts": {
-    "start": "node server-facebook-live.js",
-    "check": "node --check server-facebook-live.js"
+    "start": "node server-facebook-live.js"
   },
   "dependencies": {
     "ws": "^8.18.0"
