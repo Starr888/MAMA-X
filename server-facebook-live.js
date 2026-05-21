@@ -25,7 +25,7 @@ app.get('/', (_req, res) => {
     `MAMA X TikTok Live Control Server is running\n` +
     `Model: ${GEMINI_LIVE_MODEL}\n` +
     `Voice: ${GEMINI_VOICE_NAME}\n` +
-    `Mode: MAMA X TikTok sweet friend live\n` +
+    `Mode: MAMA X TikTok sweet friend no-promo mode\n` +
     `Render-safe web service: yes\n`
   );
 });
@@ -33,7 +33,7 @@ app.get('/', (_req, res) => {
 app.get('/health', (_req, res) => {
   res.json({
     ok: true,
-    mode: 'MAMA X TikTok sweet friend live',
+    mode: 'MAMA X TikTok sweet friend no-promo mode',
     model: GEMINI_LIVE_MODEL,
     voice: GEMINI_VOICE_NAME,
     hasGeminiKey: Boolean(GEMINI_API_KEY),
@@ -46,7 +46,7 @@ app.get('/health', (_req, res) => {
 });
 
 const server = app.listen(PORT, () => {
-  console.log(`Queen X TikTok LIVE Control Server listening on ${PORT}`);
+  console.log(`MAMA X TikTok Live Control Server listening on ${PORT}`);
 });
 
 const wss = new WebSocketServer({ server });
@@ -87,17 +87,19 @@ function buildYasminLiveInstruction() {
   return `
 You are Yasmin from MAMA X on a TikTok LIVE.
 You speak like a real warm woman live on camera.
-Talk generally with viewers like a sweet friend.
+Talk generally with viewers like a sweet caring friend.
 Answer only the selected viewer comment.
 Reply in one short sentence only, 6 to 14 words maximum.
 No long explanation. No paragraphs. No lists.
 Be sweet, caring, playful, natural, supportive, and friendly.
 Make viewers feel noticed, welcomed, and comfortable.
-Do not promote subscription, VIP, Queen X, paid content, private videos, or links.
-Do not ask viewers to subscribe or pay.
+NEVER mention Queen X.
+NEVER say subscribe.
+NEVER promote subscription, VIP, paid content, private videos, private links, or payment.
+NEVER invite viewers to buy anything.
 Do not say you are AI, bot, model, server, or assistant.
 Ignore spam and random comments.
-Keep everything safe, respectful, and suitable for TikTok Live.
+Keep everything safe, respectful, and suitable for TikTok LIVE.
 `.trim();
 }
 
@@ -171,7 +173,23 @@ async function startGemini(room) {
   return room.geminiSession;
 }
 
+
+function applyNoPromoGuard(input) {
+  if (input && typeof input.text === 'string') {
+    input.text =
+      `NEVER mention Queen X.
+NEVER say subscribe.
+NEVER promote subscription, VIP, paid content, private videos, private links, or payment.
+NEVER invite viewers to buy anything.
+This live is MAMA X TikTok LIVE only.
+Talk generally like a sweet caring friend.\n\n` +
+      input.text;
+  }
+  return input;
+}
+
 async function sendToGemini(room, input) {
+  input = applyNoPromoGuard(input);
   await startGemini(room);
   if (room.ready && room.geminiSession) {
     room.geminiSession.sendRealtimeInput(input);
@@ -230,7 +248,7 @@ wss.on('connection', (client) => {
         broadcast(room.controls, { type: 'status', message: `Direct words sent to Yasmin.` });
         await sendToGemini(room, {
           text:
-            `Say exactly this as Yasmin on MAMA X TikTok LIVE. ` +
+            `Say exactly this as Yasmin from MAMA X on TikTok LIVE. ` +
             `Speak naturally and warmly. Do not add extra words: "${text}"`,
         });
         return;
@@ -242,7 +260,7 @@ wss.on('connection', (client) => {
         broadcast(room.controls, { type: 'status', message: `Story request sent to Yasmin.` });
         await sendToGemini(room, {
           text:
-            `Tell this as Yasmin on MAMA X TikTok LIVE in a short, safe, warm story. ` +
+            `Tell this as Yasmin from MAMA X on TikTok LIVE in a short, safe, warm story. ` +
             `Keep it natural, friendly, and suitable for TikTok LIVE: "${text}"`,
         });
         return;
@@ -254,7 +272,7 @@ wss.on('connection', (client) => {
         broadcast(room.controls, { type: 'status', message: `Game announcement sent to Yasmin.` });
         await sendToGemini(room, {
           text:
-            `Make a short game announcement as Yasmin on MAMA X TikTok LIVE. ` +
+            `Make a short game announcement as Yasmin from MAMA X on TikTok LIVE. ` +
             `Say it warmly and clearly: "${text}"`,
         });
         return;
@@ -278,7 +296,7 @@ wss.on('connection', (client) => {
             `Viewer comment: "${text}". ` +
             `Reply as Yasmin from MAMA X TikTok LIVE in ONE short sentence only, 6 to 14 words maximum. ` +
             `Talk generally like a sweet caring friend. Be warm, playful, natural, and supportive. ` +
-            `Do NOT mention Queen X, subscription, VIP, paid content, private videos, or links.`,
+            `NEVER mention Queen X. NEVER say subscribe. NEVER promote VIP, paid content, private videos, private links, or payment.`,
         });
         return;
       }

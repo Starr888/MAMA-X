@@ -1,5 +1,5 @@
 {
-  "name": "mama-x-tiktok-live-server",
+  "name": "mama-x-tiktok-no-subscribe-server",
   "version": "1.0.0",
   "type": "module",
   "main": "server-facebook-live.js",
