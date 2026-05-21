@@ -1,15 +1,13 @@
 {
-  "name": "queenx-yasmin-live-server",
-  "version": "1.0.0",
-  "description": "Render WebSocket server for Yasmin Control Center and AutoPilot.",
-  "main": "server-facebook-live.js",
+  "name": "yasmin-tiktok-auto-bot-more-reply",
+  "version": "2.0.0",
+  "description": "TikFinity LIVE comments to Yasmin MAMA X live server, replies more often, no Khmer.",
+  "main": "yasmin-auto-bridge.js",
   "scripts": {
-    "start": "node server-facebook-live.js"
+    "start": "node yasmin-auto-bridge.js",
+    "test": "node yasmin-auto-bridge.js --test Hello Yasmin"
   },
   "dependencies": {
     "ws": "^8.18.0"
-  },
-  "engines": {
-    "node": ">=18"
   }
 }
